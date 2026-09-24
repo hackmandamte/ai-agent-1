@@ -104,6 +104,6 @@ Do not claim something was done unless you actually performed it.
 
 
 if __name__ == "__main__":
-    agent(
-        "Inspect this repository and tell me what I should work on first."
-    )
+    import sys
+    goal = " ".join(sys.argv[1:]).strip() or "Inspect this repository and tell me what I should work on first."
+    agent(goal)

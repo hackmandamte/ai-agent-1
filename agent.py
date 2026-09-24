@@ -2,7 +2,8 @@ import json
 from llm import ask
 from tools.shell import run
 from tools.files import read_file, write_file, list_files
-from tools.git import git_status, git_diff, git_log
+from tools.git import git_status, git_diff, git_log, git_commit
+from tools.approval import ask_approval
 
 
 def execute_tool(name, arguments):
@@ -30,6 +31,14 @@ def execute_tool(name, arguments):
 
         if name == "git_log":
             return git_log()
+
+        if name == "git_commit":
+            message = arguments["message"]
+
+            if not ask_approval(f"Git commit: {message}"):
+                return "APPROVAL DENIED: Git commit was not executed."
+
+            return git_commit(message)
 
         return f"ERROR: Unknown tool: {name}"
 

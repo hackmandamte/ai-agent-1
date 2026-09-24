@@ -1,5 +1,8 @@
 import shlex
 import subprocess
+from pathlib import Path
+
+WORKSPACE_ROOT = Path.cwd().resolve()
 
 BLOCKED_COMMANDS = {
     "rm",
@@ -28,11 +31,17 @@ def run(command: str) -> str:
     if executable in BLOCKED_COMMANDS:
         return f"ERROR: Command blocked for safety: {executable}"
 
+    normalized = " ".join(parts)
+
+    if normalized in {"python agent.py", "python3 agent.py"}:
+        return "ERROR: Recursive agent execution blocked."
+
     result = subprocess.run(
         command,
         shell=True,
         text=True,
         capture_output=True,
+        cwd=WORKSPACE_ROOT,
     )
 
     output = result.stdout + result.stderr

@@ -76,6 +76,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "git_commit",
+            "description": "Create a Git commit with all current changes. This is a high-impact action and requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"}
+                },
+                "required": ["message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git_status",
             "description": "Show git working tree status.",
             "parameters": {

@@ -36,6 +36,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "write_file",
+            "description": "Write complete text content to a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "shell",
             "description": "Run a shell command.",
             "parameters": {
@@ -44,6 +59,17 @@ TOOLS = [
                     "command": {"type": "string"}
                 },
                 "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": "Show recent Git commit history.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
             }
         }
     },

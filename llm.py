@@ -3,14 +3,67 @@ import time
 import requests
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODELS = [
-    "cohere/north-mini-code:free",
-    "poolside/laguna-s-2.1:free",
-    "qwen/qwen3.8-27b:free",
-    "nex-agi/nex-n2.5-pro:free",
-    "dots-studio/dots-3-note-preview:free",
-    "openrouter/free",
-]
+MODEL_CATALOG_URL = "https://openrouter.ai/api/v1/models"
+
+PREFERRED_MODELS = {
+    "cohere/north-mini-code:free": 100,
+    "poolside/laguna-s-2.1:free": 98,
+    "poolside/laguna-xs-2.1:free": 94,
+    "nex-agi/nex-n2.5-pro:free": 96,
+    "nex-agi/nex-n2.5-mini:free": 90,
+    "qwen/qwen3.8-27b:free": 92,
+    "dots-studio/dots-3-note-preview:free": 88,
+    "nvidia/nemotron-3-super-120b-a12b:free": 86,
+    "nvidia/nemotron-3-ultra-550b-a55b:free": 85,
+    "google/gemma-4-31b-it:free": 82,
+    "google/gemma-4-26b-a4b-it:free": 80,
+    "nvidia/nemotron-3.5-lightning:free": 75,
+    "stealth/space-bunny-alpha": 78,
+    "openrouter/free": 1,
+}
+
+def discover_models(key):
+    response = requests.get(
+        MODEL_CATALOG_URL,
+        headers={"Authorization": f"Bearer {key}"},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    models = response.json().get("data", [])
+    discovered = []
+
+    for model in models:
+        model_id = model.get("id", "")
+        pricing = model.get("pricing", {})
+        supported = model.get("supported_parameters", [])
+        architecture = model.get("architecture", {})
+
+        try:
+            prompt_price = float(pricing.get("prompt", "-1"))
+            completion_price = float(pricing.get("completion", "-1"))
+        except (TypeError, ValueError):
+            continue
+
+        if prompt_price != 0 or completion_price != 0:
+            continue
+
+        if "tools" not in supported or "tool_choice" not in supported:
+            continue
+
+        if "text" not in architecture.get("output_modalities", []):
+            continue
+
+        if model.get("expiration_date"):
+            continue
+
+        score = PREFERRED_MODELS.get(model_id, 50)
+
+        discovered.append((score, model_id))
+
+    discovered.sort(reverse=True)
+
+    return [model_id for score, model_id in discovered]
 
 TOOLS = [
     {
@@ -125,7 +178,18 @@ def ask(messages):
 
     last_error = None
 
-    for index, model in enumerate(MODELS, start=1):
+    try:
+        models = discover_models(key)
+    except requests.RequestException as e:
+        print(f"[LLM] Model discovery failed: {type(e).__name__}: {e}")
+        models = ["openrouter/free"]
+
+    if not models:
+        models = ["openrouter/free"]
+
+    print(f"[LLM] Discovered {len(models)} eligible models")
+
+    for index, model in enumerate(models, start=1):
         print(f"[LLM] Trying model {index}/{len(MODELS)}: {model}")
 
         try:

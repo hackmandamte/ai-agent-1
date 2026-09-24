@@ -2,6 +2,14 @@ import os
 import time
 import requests
 
+MODEL_COOLDOWNS = {}
+
+def model_on_cooldown(model):
+    return MODEL_COOLDOWNS.get(model, 0) > time.time()
+
+def set_model_cooldown(model, delay):
+    MODEL_COOLDOWNS[model] = time.time() + delay
+
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_CATALOG_URL = "https://openrouter.ai/api/v1/models"
 
@@ -200,7 +208,11 @@ def ask(messages):
     print(f"[LLM] Discovered {len(models)} eligible models")
 
     for index, model in enumerate(models, start=1):
-        print(f"[LLM] Trying model {index}/{len(MODELS)}: {model}")
+        if model_on_cooldown(model):
+            print(f"[LLM] Skipping {model} — still on cooldown")
+            continue
+
+        print(f"[LLM] Trying model {index}/{len(models)}: {model}")
 
         try:
             response = requests.post(
@@ -227,8 +239,8 @@ def ask(messages):
                     delay = 2.0
 
                 last_error = f"{model}: HTTP 429"
-                print(f"[LLM] {last_error} — waiting {delay:.1f}s before fallback")
-                time.sleep(delay)
+                set_model_cooldown(model, delay)
+                print(f"[LLM] {last_error} — cooling down for {delay:.1f}s")
                 continue
 
             if response.status_code == 404 or response.status_code >= 500:

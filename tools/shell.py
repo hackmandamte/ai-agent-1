@@ -2,6 +2,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from .approval import ask_approval
+
 WORKSPACE_ROOT = Path.cwd().resolve()
 
 BLOCKED_COMMANDS = {
@@ -14,6 +16,16 @@ BLOCKED_COMMANDS = {
     "poweroff",
     "su",
     "sudo",
+}
+
+APPROVAL_COMMANDS = {
+    "python",
+    "python3",
+    "sh",
+    "bash",
+    "curl",
+    "wget",
+    "git",
 }
 
 
@@ -35,6 +47,10 @@ def run(command: str) -> str:
 
     if normalized in {"python agent.py", "python3 agent.py"}:
         return "ERROR: Recursive agent execution blocked."
+
+    if executable in APPROVAL_COMMANDS:
+        if not ask_approval(f"Shell command: {command}"):
+            return "APPROVAL DENIED: Shell command was not executed."
 
     result = subprocess.run(
         command,

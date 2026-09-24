@@ -115,20 +115,33 @@ TOOLS = [
 def ask(messages):
     key = os.environ["OPENROUTER_API_KEY"]
 
-    response = requests.post(
-        API_URL,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": MODEL,
-            "messages": messages,
-            "tools": TOOLS,
-            "tool_choice": "auto",
-        },
-        timeout=120,
-    )
+    try:
+        response = requests.post(
+            API_URL,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MODEL,
+                "messages": messages,
+                "tools": TOOLS,
+                "tool_choice": "auto",
+            },
+            timeout=120,
+        )
 
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]
+        if response.status_code == 429:
+            return {
+                "role": "assistant",
+                "content": "LLM provider rate limit reached (HTTP 429). Stop and retry later."
+            }
+
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]
+
+    except requests.RequestException as e:
+        return {
+            "role": "assistant",
+            "content": f"LLM provider request failed: {type(e).__name__}: {e}"
+        }

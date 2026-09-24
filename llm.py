@@ -5,6 +5,12 @@ import requests
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_CATALOG_URL = "https://openrouter.ai/api/v1/models"
 
+EXCLUDED_MODELS = {
+    "inclusionai/ling-3.0-flash-sante:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "liquid/lfm-2.5-2.6b:free",
+}
+
 PREFERRED_MODELS = {
     "cohere/north-mini-code:free": 100,
     "poolside/laguna-s-2.1:free": 98,
@@ -35,6 +41,10 @@ def discover_models(key):
 
     for model in models:
         model_id = model.get("id", "")
+
+        if model_id in EXCLUDED_MODELS:
+            continue
+
         pricing = model.get("pricing", {})
         supported = model.get("supported_parameters", [])
         architecture = model.get("architecture", {})

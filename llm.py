@@ -1,8 +1,16 @@
 import os
+import time
 import requests
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "cohere/north-mini-code:free"
+MODELS = [
+    "cohere/north-mini-code:free",
+    "poolside/laguna-s-2.1:free",
+    "qwen/qwen3.8-27b:free",
+    "nex-agi/nex-n2.5-pro:free",
+    "dots-studio/dots-3-note-preview:free",
+    "openrouter/free",
+]
 
 TOOLS = [
     {
@@ -115,33 +123,74 @@ TOOLS = [
 def ask(messages):
     key = os.environ["OPENROUTER_API_KEY"]
 
-    try:
-        response = requests.post(
-            API_URL,
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "tools": TOOLS,
-                "tool_choice": "auto",
-            },
-            timeout=120,
+    last_error = None
+
+    for index, model in enumerate(MODELS, start=1):
+        print(f"[LLM] Trying model {index}/{len(MODELS)}: {model}")
+
+        try:
+            response = requests.post(
+                API_URL,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "tools": TOOLS,
+                    "tool_choice": "auto",
+                },
+                timeout=120,
+            )
+
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+
+                try:
+                    delay = min(float(retry_after), 10.0) if retry_after else 2.0
+                except ValueError:
+                    delay = 2.0
+
+                last_error = f"{model}: HTTP 429"
+                print(f"[LLM] {last_error} — waiting {delay:.1f}s before fallback")
+                time.sleep(delay)
+                continue
+
+            if response.status_code == 404 or response.status_code >= 500:
+                last_error = f"{model}: HTTP {response.status_code}"
+                print(f"[LLM] {last_error} — trying fallback")
+                continue
+
+            if response.status_code in {401, 403}:
+                return {
+                    "role": "assistant",
+                    "content": (
+                        f"LLM authentication/access failure: "
+                        f"HTTP {response.status_code}"
+                    )
+                }
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            if not data.get("choices"):
+                last_error = f"{model}: response contained no choices"
+                print(f"[LLM] {last_error} — trying fallback")
+                continue
+
+            print(f"[LLM] Using: {model}")
+            return data["choices"][0]["message"]
+
+        except requests.RequestException as e:
+            last_error = f"{model}: {type(e).__name__}: {e}"
+            print(f"[LLM] {last_error} — trying fallback")
+
+    return {
+        "role": "assistant",
+        "content": (
+            "All configured LLM models failed. "
+            f"Last error: {last_error}"
         )
-
-        if response.status_code == 429:
-            return {
-                "role": "assistant",
-                "content": "LLM provider rate limit reached (HTTP 429). Stop and retry later."
-            }
-
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]
-
-    except requests.RequestException as e:
-        return {
-            "role": "assistant",
-            "content": f"LLM provider request failed: {type(e).__name__}: {e}"
-        }
+    }

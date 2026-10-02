@@ -1,282 +1,230 @@
-import os
-import time
-import requests
+"""LLM orchestration layer: provider-neutral routing and request sanitization."""
+import copy
+import json
+from providers.local_llama_provider import LocalLlamaProvider
+from tools.mcp import get_mcp_tool_definitions
+from tools.web import web_fetch_definition
 
-MODEL_COOLDOWNS = {}
-
-def model_on_cooldown(model):
-    return MODEL_COOLDOWNS.get(model, 0) > time.time()
-
-def set_model_cooldown(model, delay):
-    MODEL_COOLDOWNS[model] = time.time() + delay
-
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL_CATALOG_URL = "https://openrouter.ai/api/v1/models"
-
-EXCLUDED_MODELS = {
-    "inclusionai/ling-3.0-flash-sante:free",
-    "inclusionai/ling-3.0-flash-fin:free",
-    "liquid/lfm-2.5-2.6b:free",
-}
-
-PREFERRED_MODELS = {
-    "cohere/north-mini-code:free": 100,
-    "poolside/laguna-s-2.1:free": 98,
-    "poolside/laguna-xs-2.1:free": 94,
-    "nex-agi/nex-n2.5-pro:free": 96,
-    "nex-agi/nex-n2.5-mini:free": 90,
-    "qwen/qwen3.8-27b:free": 92,
-    "dots-studio/dots-3-note-preview:free": 88,
-    "nvidia/nemotron-3-super-120b-a12b:free": 86,
-    "nvidia/nemotron-3-ultra-550b-a55b:free": 85,
-    "google/gemma-4-31b-it:free": 82,
-    "google/gemma-4-26b-a4b-it:free": 80,
-    "nvidia/nemotron-3.5-lightning:free": 75,
-    "stealth/space-bunny-alpha": 78,
-    "openrouter/free": 1,
-}
-
-def discover_models(key):
-    response = requests.get(
-        MODEL_CATALOG_URL,
-        headers={"Authorization": f"Bearer {key}"},
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    models = response.json().get("data", [])
-    discovered = []
-
-    for model in models:
-        model_id = model.get("id", "")
-
-        if model_id in EXCLUDED_MODELS:
-            continue
-
-        pricing = model.get("pricing", {})
-        supported = model.get("supported_parameters", [])
-        architecture = model.get("architecture", {})
-
-        try:
-            prompt_price = float(pricing.get("prompt", "-1"))
-            completion_price = float(pricing.get("completion", "-1"))
-        except (TypeError, ValueError):
-            continue
-
-        if prompt_price != 0 or completion_price != 0:
-            continue
-
-        if "tools" not in supported or "tool_choice" not in supported:
-            continue
-
-        if "text" not in architecture.get("output_modalities", []):
-            continue
-
-        if model.get("expiration_date"):
-            continue
-
-        score = PREFERRED_MODELS.get(model_id, 50)
-
-        discovered.append((score, model_id))
-
-    discovered.sort(reverse=True)
-
-    return [model_id for score, model_id in discovered]
+LOCAL_LLAMA = "local_llama"
+UNKNOWN_TOOL_CALL_ID = "unknown"
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List files and directories.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"}
-                },
-                "required": ["path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a text file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"}
-                },
-                "required": ["path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write complete text content to a file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
-                },
-                "required": ["path", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "shell",
-            "description": "Run a shell command.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string"}
-                },
-                "required": ["command"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_log",
-            "description": "Show recent Git commit history.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_commit",
-            "description": "Create a Git commit with all current changes. This is a high-impact action and requires user approval.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string"}
-                },
-                "required": ["message"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_status",
-            "description": "Show git working tree status.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_diff",
-            "description": "Show current git changes.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    }
+    {"type":"function","function":{"name":"list_files","description":"List files and directories.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+    {"type":"function","function":{"name":"read_file","description":"Read a text file.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+    {"type":"function","function":{"name":"write_file","description":"Write complete text content to a file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
+    {"type":"function","function":{"name":"shell","description":"Run a shell command.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"git_log","description":"Show recent Git commit history.","parameters":{"type":"object","properties":{}}}},
+    {"type":"function","function":{"name":"git_commit","description":"Create a Git commit with all current changes. This is a high-impact action and requires user approval.","parameters":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}}},
+    {"type":"function","function":{"name":"git_status","description":"Show git working tree status.","parameters":{"type":"object","properties":{}}}},
+    {"type":"function","function":{"name":"git_diff","description":"Show current git changes.","parameters":{"type":"object","properties":{}}}},
+    {"type":"function","function":{"name":"get_runtime_info","description":"Return runtime environment information.","parameters":{"type":"object","properties":{}}}},
 ]
 
+_PROVIDER = LocalLlamaProvider()
 
-def ask(messages):
-    key = os.environ["OPENROUTER_API_KEY"]
 
-    last_error = None
+def _current_tools():
+    return TOOLS + [web_fetch_definition()] + get_mcp_tool_definitions()
 
+
+def reset_session_state():
+    return None
+
+
+def enabled_providers():
+    return (LOCAL_LLAMA,)
+
+
+def model_on_cooldown(model):
+    return False
+
+
+def set_model_cooldown(model, delay):
+    return None
+
+
+def sanitize_tool_arguments(raw):
+    if not isinstance(raw, str) or not raw.strip():
+        return "{}"
     try:
-        models = discover_models(key)
-    except requests.RequestException as e:
-        print(f"[LLM] Model discovery failed: {type(e).__name__}: {e}")
-        models = ["openrouter/free"]
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return "{}"
+    return raw if isinstance(value, dict) else "{}"
 
-    if not models:
-        models = ["openrouter/free"]
 
-    print(f"[LLM] Discovered {len(models)} eligible models")
+def normalize_tool_call(call, default_id=UNKNOWN_TOOL_CALL_ID, used_ids=None):
+    result = {
+        "id": default_id,
+        "type": "function",
+        "function": {"name": "unknown_tool", "arguments": "{}"},
+    }
+    if isinstance(call, dict):
+        raw_id = call.get("id")
+        if isinstance(raw_id, str) and raw_id.strip():
+            result["id"] = raw_id
+        function = call.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+            if isinstance(name, str) and name:
+                result["function"]["name"] = name
+            result["function"]["arguments"] = sanitize_tool_arguments(function.get("arguments"))
+    if used_ids is not None:
+        original = result["id"]
+        candidate = original
+        counter = 2
+        while candidate in used_ids:
+            candidate = f"{original}_{counter}"
+            counter += 1
+        result["id"] = candidate
+        used_ids.add(candidate)
+    return result
 
-    for index, model in enumerate(models, start=1):
-        if model_on_cooldown(model):
-            print(f"[LLM] Skipping {model} — still on cooldown")
+
+def _tool_content(content):
+    if isinstance(content, str):
+        return content if content.strip() else "(empty tool result)"
+    if content is None:
+        return "(empty tool result)"
+    try:
+        encoded = json.dumps(content, ensure_ascii=False)
+    except (TypeError, ValueError):
+        encoded = str(content)
+    return encoded if encoded.strip() else "(empty tool result)"
+def sanitize_messages_for_request(history):
+    output = []
+    pending_calls = {}
+    used_ids = set()
+
+    for message in history if isinstance(history, list) else []:
+        if not isinstance(message, dict):
             continue
 
-        print(f"[LLM] Trying model {index}/{len(models)}: {model}")
+        role = message.get("role")
 
-        try:
-            response = requests.post(
-                API_URL,
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "tools": TOOLS,
-                    "tool_choice": "auto",
-                },
-                timeout=120,
-            )
+        if role == "assistant":
+            clean = {"role": "assistant", "content": message.get("content") or ""}
+            calls = message.get("tool_calls")
+            pending_calls = {}
 
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
+            if isinstance(calls, list) and calls:
+                normalized = []
+                turn_ids = set()
 
-                try:
-                    delay = min(float(retry_after), 10.0) if retry_after else 2.0
-                except ValueError:
-                    delay = 2.0
+                for call in calls:
+                    item = normalize_tool_call(call, UNKNOWN_TOOL_CALL_ID, turn_ids)
+                    if item["id"] in used_ids:
+                        base_id = item["id"]
+                        n = 2
+                        while f"{base_id}_{n}" in used_ids:
+                            n += 1
+                        item["id"] = f"{base_id}_{n}"
+                    used_ids.add(item["id"])
+                    normalized.append(item)
+                    pending_calls[item["id"]] = item
 
-                last_error = f"{model}: HTTP 429"
-                set_model_cooldown(model, delay)
-                print(f"[LLM] {last_error} — cooling down for {delay:.1f}s")
+                clean["tool_calls"] = normalized
+
+            output.append(clean)
+            continue
+
+        if role == "tool":
+            call_id = message.get("tool_call_id")
+            if not isinstance(call_id, str) or not call_id.strip():
+                continue
+            if call_id not in pending_calls:
                 continue
 
-            if response.status_code == 404 or response.status_code >= 500:
-                last_error = f"{model}: HTTP {response.status_code}"
-                print(f"[LLM] {last_error} — trying fallback")
-                continue
+            clean = {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": _tool_content(message.get("content")),
+            }
 
-            if response.status_code in {401, 403}:
-                return {
-                    "role": "assistant",
-                    "content": (
-                        f"LLM authentication/access failure: "
-                        f"HTTP {response.status_code}"
-                    )
-                }
+            name = message.get("name")
+            if isinstance(name, str) and name:
+                clean["name"] = name
 
-            response.raise_for_status()
+            output.append(clean)
+            pending_calls.pop(call_id, None)
+            continue
 
-            data = response.json()
+        if isinstance(role, str) and role:
+            output.append({
+                "role": role,
+                "content": message.get("content") or "",
+            })
 
-            if not data.get("choices"):
-                last_error = f"{model}: response contained no choices"
-                print(f"[LLM] {last_error} — trying fallback")
-                continue
+    return copy.deepcopy(output)
+def redact_secrets(value, limit=4000):
+    if not value:
+        return ""
+    text = str(value).replace("\\r", " ").replace("\\n", " ")
+    parts = text.split()
+    cleaned = []
+    for part in parts:
+        lower = part.lower()
+        if lower.startswith("bearer") and len(part) > 7:
+            cleaned.append(part[:6] + "<redacted>")
+        elif lower.startswith("sk-") or lower.startswith("sk_") or lower.startswith("or-v1-") or lower.startswith("or_"):
+            cleaned.append("<redacted>")
+        else:
+            cleaned.append(part)
+    return " ".join(cleaned)[:limit].rstrip()
 
-            print(f"[LLM] Using: {model}")
-            return data["choices"][0]["message"]
 
-        except requests.RequestException as e:
-            last_error = f"{model}: {type(e).__name__}: {e}"
-            print(f"[LLM] {last_error} — trying fallback")
+def describe_provider_error(body):
+    if not isinstance(body, str) or not body:
+        return {}
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
+        return {}
+    error = payload["error"]
+    metadata = error.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    result = {}
+    if isinstance(metadata.get("provider_name"), str):
+        result["provider"] = metadata["provider_name"]
+    if isinstance(error.get("code"), int):
+        result["code"] = error["code"]
+    if isinstance(error.get("message"), str):
+        result["message"] = redact_secrets(error["message"])
+    return result
 
-    return {
-        "role": "assistant",
-        "content": (
-            "All configured LLM models failed. "
-            f"Last error: {last_error}"
-        )
-    }
+
+def format_http_error(model, status, body):
+    details = describe_provider_error(body)
+    provider = details.get("provider", "unknown")
+    message = details.get("message") or redact_secrets(body) or "no response body"
+    return f"provider={provider} model={model} status={status} {message}"
+
+# provider result helpers
+
+def _message_from_result(provider, name, result):
+    if result.get('status') != 'response':
+        return None, result.get('error') or 'provider failure'
+    response = result['response']
+    try:
+        data = response.json()
+    except ValueError:
+        return None, 'invalid JSON response'
+    choices = data.get('choices') if isinstance(data, dict) else None
+    if choices and isinstance(choices[0].get('message'), dict):
+        return choices[0]['message'], None
+    return None, 'response contained no choices'
+
+def ask(messages):
+    request_messages = sanitize_messages_for_request(messages)
+    _PROVIDER.tools = _current_tools()
+    model = _PROVIDER.model
+    try:
+        result = _PROVIDER.call_model(model, request_messages)
+    except Exception as exc:
+        return {"role": "assistant", "content": "Local Qwen failed: " + redact_secrets(f"{type(exc).__name__}: {exc}")}
+    message, error = _message_from_result(_PROVIDER, model, result)
+    if message is not None:
+        return message
+    return {"role": "assistant", "content": "Local Qwen failed: " + redact_secrets(error or "unknown error")}

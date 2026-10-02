@@ -1,19 +1,41 @@
 from pathlib import Path
 
+
 WORKSPACE_ROOT = Path.cwd().resolve()
 
 
 def safe_path(path: str) -> Path:
-    target = (WORKSPACE_ROOT / path).resolve()
+    """Resolve a workspace-relative or in-workspace absolute path safely."""
+    workspace_root = WORKSPACE_ROOT.resolve()
+    candidate = Path(path)
 
-    if target != WORKSPACE_ROOT and WORKSPACE_ROOT not in target.parents:
+    # Path joining already handles absolute paths, but making the two cases
+    # explicit prevents platform-specific pathlib behavior from weakening the
+    # workspace boundary.
+    if candidate.is_absolute():
+        target = candidate
+    else:
+        target = workspace_root / candidate
+
+    target = target.resolve()
+
+    if target != workspace_root and workspace_root not in target.parents:
         raise ValueError(f"Path outside workspace: {path}")
 
     return target
 
 
 def read_file(path: str) -> str:
-    return safe_path(path).read_text()
+    target = safe_path(path)
+
+    if target.is_dir():
+        return f"ERROR: Path is a directory, not a file: {path}"
+
+    try:
+        return target.read_text(encoding="utf-8")
+    except IsADirectoryError:
+        # A directory can be replaced between the check and the read.
+        return f"ERROR: Path is a directory, not a file: {path}"
 
 
 def write_file(path: str, content: str) -> str:

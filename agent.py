@@ -1,9 +1,63 @@
 import json
-from llm import ask
+from llm import UNKNOWN_TOOL_CALL_ID, ask
 from tools.shell import run
 from tools.files import read_file, write_file, list_files
 from tools.git import git_status, git_diff, git_log, git_commit
 from tools.approval import ask_approval
+from tools.runtime import get_runtime_context
+from tools.web import web_fetch
+from tools.mcp import execute_mcp_tool, is_mcp_tool, close_all
+
+UNKNOWN_TOOL_NAME = "unknown_tool"
+
+
+def describe_tool_call(call):
+    """Best-effort (name, tool_call_id) extraction that never raises.
+
+    A malformed tool call must still be reportable back to the model, so the
+    name/id are resolved defensively before argument parsing is attempted.
+    """
+    name = UNKNOWN_TOOL_NAME
+    tool_call_id = UNKNOWN_TOOL_CALL_ID
+
+    if isinstance(call, dict):
+        tool_call_id = call.get("id", UNKNOWN_TOOL_CALL_ID)
+        function = call.get("function")
+
+        if isinstance(function, dict):
+            name = function.get("name", UNKNOWN_TOOL_NAME)
+
+    return name, tool_call_id
+
+
+def parse_tool_arguments(function):
+    """Return the decoded arguments dict for a tool call's function payload.
+
+    Missing/None arguments default to an empty object (so no-argument tools
+    such as git_status still work). Raises TypeError/ValueError --
+    json.JSONDecodeError being a ValueError -- when the arguments are not a
+    JSON string or do not decode to a JSON object.
+    """
+    raw_arguments = function.get("arguments")
+
+    if raw_arguments is None:
+        raw_arguments = "{}"
+
+    if not isinstance(raw_arguments, str):
+        raise ValueError(
+            "Tool arguments must be a JSON string, "
+            f"got {type(raw_arguments).__name__}"
+        )
+
+    arguments = json.loads(raw_arguments)
+
+    if not isinstance(arguments, dict):
+        raise ValueError(
+            "Tool arguments must decode to a JSON object, "
+            f"got {type(arguments).__name__}"
+        )
+
+    return arguments
 
 
 def execute_tool(name, arguments):
@@ -40,32 +94,52 @@ def execute_tool(name, arguments):
 
             return git_commit(message)
 
+        if name == "get_runtime_info":
+            return get_runtime_context()
+
+        if name == "web_fetch":
+            return web_fetch(arguments["url"])
+
+        if is_mcp_tool(name):
+            return execute_mcp_tool(name, arguments)
+
         return f"ERROR: Unknown tool: {name}"
 
     except Exception as e:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-def agent(goal, max_steps=15):
-    messages = [
-        {
-            "role": "system",
-            "content": """You are a software development agent.
+def agent(goal, max_steps=30):
+    # Get runtime context at startup
+    runtime_context = get_runtime_context()
+
+    # Create system message with runtime information
+    system_message = {
+        "role": "system",
+        "content": f"""You are a software development agent.
 
 You work toward the user's goal by inspecting files, using shell commands,
 understanding the repository, making changes when requested, testing them,
 and inspecting Git changes.
 
-Use tools whenever necessary.
+Use tools whenever necessary. You have read-only internet access through web_fetch.
+You may also have MCP tools. MCP tool names begin with mcp__ and are external services;
+use them when they are relevant to the user's goal.
 
-Do not claim something was done unless you actually performed it.
+Do not claim something is done unless you actually performed it.
+
+=== RUNTIME ENVIRONMENT CONTEXT ===
+Operating System: {runtime_context['os']}
+Shell/Environment: {runtime_context['shell']}
+Python Version: {runtime_context['python_version']}
+CPU Architecture: {runtime_context['architecture']}
+Workspace Path: {runtime_context['workspace_path']}
+
+This runtime context is automatically detected at each agent run.
 """
-        },
-        {
-            "role": "user",
-            "content": goal
-        }
-    ]
+    }
+
+    messages = [system_message, {"role": "user", "content": goal}]
 
     for step in range(max_steps):
         print(f"\n===== STEP {step + 1} =====")
@@ -82,8 +156,41 @@ Do not claim something was done unless you actually performed it.
         messages.append(message)
 
         for call in tool_calls:
-            name = call["function"]["name"]
-            arguments = json.loads(call["function"]["arguments"])
+            name, tool_call_id = describe_tool_call(call)
+
+            try:
+                if not isinstance(call, dict):
+                    raise TypeError("Tool call must be an object")
+
+                function = call["function"]
+
+                if not isinstance(function, dict):
+                    raise TypeError("Tool call function must be an object")
+
+                name = function["name"]
+
+                if not isinstance(name, str) or not name:
+                    raise ValueError("Tool call is missing a tool name")
+
+                arguments = parse_tool_arguments(function)
+
+            except (json.JSONDecodeError, TypeError, ValueError, KeyError) as e:
+                print(f"\n[TOOL ERROR] {name}")
+                print(f"[RESULT] Invalid tool arguments: {type(e).__name__}: {e}")
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": name,
+                    "content": (
+                        "ERROR: Invalid JSON tool arguments. "
+                        "Do not execute this tool call. "
+                        "Regenerate the tool call with valid JSON. "
+                        f"Parser error: {type(e).__name__}: {e}"
+                    )
+                })
+
+                continue
 
             print(f"\n[TOOL] {name}")
             print(f"[ARGS] {arguments}")
@@ -95,7 +202,7 @@ Do not claim something was done unless you actually performed it.
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": call["id"],
+                "tool_call_id": tool_call_id,
                 "name": name,
                 "content": result
             })
@@ -104,6 +211,28 @@ Do not claim something was done unless you actually performed it.
 
 
 if __name__ == "__main__":
-    import sys
-    goal = " ".join(sys.argv[1:]).strip() or "Inspect this repository and tell me what I should work on first."
-    agent(goal)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AI coding agent")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=30,
+        help="Maximum number of agent steps (default: 30)",
+    )
+    parser.add_argument(
+        "goal",
+        nargs="*",
+        help="Goal for the coding agent",
+    )
+
+    args = parser.parse_args()
+
+    goal = " ".join(args.goal).strip() or (
+        "Inspect this repository and tell me what I should work on first."
+    )
+
+    if args.max_steps < 1:
+        parser.error("--max-steps must be at least 1")
+
+    agent(goal, max_steps=args.max_steps)

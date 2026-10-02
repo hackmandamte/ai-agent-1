@@ -13,10 +13,8 @@
     <section class="card">
       <label for="base">API base</label>
       <input id="base" autocomplete="url" placeholder="https://192.168.x.x:8787">
-      <label for="token">Bearer token</label>
-      <input id="token" type="password" autocomplete="off" placeholder="AGENT_API_TOKEN">
-      <div class="row"><button id="save">Save session</button><button id="clear" class="secondary">Clear</button></div>
-      <p class="hint">The token is kept only in this browser session and is never written to the Agent.</p>
+      <p class="hint">Pairing uses the Agent API secret once. The browser receives only a short-lived HttpOnly session cookie; the secret is not stored in page storage.</p>
+      <div class="row"><button id="pair">Pair browser</button><button id="logout" class="secondary">End session</button></div>
     </section>
     <section class="card">
       <label for="goal">Goal</label>

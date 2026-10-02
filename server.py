@@ -1,232 +1,151 @@
 """Authenticated Agent 1 HTTP control plane for remote clients."""
 from __future__ import annotations
-
-import json
-import os
-import secrets
-import ssl
-import threading
+import json, os, secrets, ssl, threading, time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
-
 from agent import agent
 from tools.task_manager import TaskManager
 
-MAX_GOAL_LENGTH = 12000
-MAX_CONCURRENT_TASKS = 2
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8787
-_AGENT_THREADS = {}
-_AGENT_THREADS_LOCK = threading.Lock()
-_CLIENT_DIR = Path(__file__).resolve().parent / "client"
-_CLIENT_FILES = {
-    "/": "index.html",
-    "/client/index.html": "index.html",
-    "/client/app.js": "app.js",
-    "/client/style.css": "style.css",
-}
-_CLIENT_TYPES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
-
+MAX_GOAL_LENGTH=12000
+MAX_CONCURRENT_TASKS=2
+SESSION_TTL_SECONDS=15*60
+_AGENT_THREADS={}
+_AGENT_THREADS_LOCK=threading.Lock()
+_SESSIONS={}
+_SESSIONS_LOCK=threading.Lock()
+_CLIENT_DIR=Path(__file__).resolve().parent/"client"
+_CLIENT_FILES={"/":"index.html","/client/index.html":"index.html","/client/app.js":"app.js","/client/style.css":"style.css"}
+_CLIENT_TYPES={"index.html":"text/html; charset=utf-8","app.js":"text/javascript; charset=utf-8","style.css":"text/css; charset=utf-8"}
 
 def _token():
-    value = os.environ.get("AGENT_API_TOKEN", "").strip()
-    if not value:
-        raise RuntimeError("AGENT_API_TOKEN is required")
+    value=os.environ.get("AGENT_API_TOKEN","").strip()
+    if not value: raise RuntimeError("AGENT_API_TOKEN is required")
     return value
 
-
 def _authorized(headers):
-    raw = headers.get("Authorization", "")
-    if not raw.startswith("Bearer "):
-        return False
-    supplied = raw[7:].strip()
-    return bool(supplied) and secrets.compare_digest(supplied, _token())
+    raw=headers.get("Authorization","")
+    if not raw.startswith("Bearer "): return False
+    supplied=raw[7:].strip()
+    return bool(supplied) and secrets.compare_digest(supplied,_token())
 
+def _cookie_session(headers):
+    raw=headers.get("Cookie","")
+    prefix="agent_session="
+    for item in raw.split(";"):
+        item=item.strip()
+        if item.startswith(prefix):
+            return item[len(prefix):].strip()
+    return ""
 
-def _json_bytes(payload):
-    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+def _session_authorized(headers):
+    session_id=_cookie_session(headers)
+    if not session_id: return False
+    now=time.time()
+    with _SESSIONS_LOCK:
+        expires=_SESSIONS.get(session_id)
+        if expires is None: return False
+        if expires <= now:
+            _SESSIONS.pop(session_id,None)
+            return False
+        _SESSIONS[session_id]=now+SESSION_TTL_SECONDS
+        return True
 
+def _create_session():
+    session_id=secrets.token_urlsafe(32)
+    with _SESSIONS_LOCK: _SESSIONS[session_id]=time.time()+SESSION_TTL_SECONDS
+    return session_id
+
+def _revoke_session(headers):
+    session_id=_cookie_session(headers)
+    if session_id:
+        with _SESSIONS_LOCK: _SESSIONS.pop(session_id,None)
+
+def _json_bytes(payload): return json.dumps(payload,ensure_ascii=False).encode("utf-8")
 
 def _task_payload(task):
-    return {
-        "task_id": task.task_id,
-        "goal": task.goal,
-        "status": task.status,
-        "current_step": task.current_step,
-        "max_steps": task.max_steps,
-        "verified": task.verified,
-        "last_error": task.last_error,
-        "history": task.history[-20:],
-    }
+    return {"task_id":task.task_id,"goal":task.goal,"status":task.status,"current_step":task.current_step,"max_steps":task.max_steps,"verified":task.verified,"last_error":task.last_error,"history":task.history[-20:]}
 
+def _client_response(handler,path):
+    filename=_CLIENT_FILES.get(path)
+    if not filename: return False
+    target=(_CLIENT_DIR/filename).resolve()
+    if target.parent != _CLIENT_DIR.resolve() or not target.is_file(): handler._send(404,{"error":"client asset not found"}); return True
+    body=target.read_bytes(); handler.send_response(200); handler.send_header("Content-Type",_CLIENT_TYPES[filename]); handler.send_header("Content-Length",str(len(body))); handler.send_header("Cache-Control","no-store"); handler.send_header("X-Content-Type-Options","nosniff"); handler.send_header("Content-Security-Policy","default-src 'self'; style-src 'self'; script-src 'self'"); handler.end_headers(); handler.wfile.write(body); return True
 
-def _client_response(handler, path):
-    filename = _CLIENT_FILES.get(path)
-    if not filename:
-        return False
-    target = (_CLIENT_DIR / filename).resolve()
-    if target.parent != _CLIENT_DIR.resolve() or not target.is_file():
-        handler._send(404, {"error": "client asset not found"})
-        return True
-    body = target.read_bytes()
-    handler.send_response(200)
-    handler.send_header("Content-Type", _CLIENT_TYPES[filename])
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.send_header("X-Content-Type-Options", "nosniff")
-    handler.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'")
-    handler.end_headers()
-    handler.wfile.write(body)
-    return True
-
-
-def _start_task(goal, max_steps):
+def _start_task(goal,max_steps):
     with _AGENT_THREADS_LOCK:
-        active = [thread for thread in _AGENT_THREADS.values() if thread.is_alive()]
-        if len(active) >= MAX_CONCURRENT_TASKS:
-            raise RuntimeError("maximum concurrent task limit reached")
-
-    manager = TaskManager()
-    task = manager.start(goal, max_steps=max_steps)
-    task_id = task.task_id
-
+        if len([t for t in _AGENT_THREADS.values() if t.is_alive()]) >= MAX_CONCURRENT_TASKS: raise RuntimeError("maximum concurrent task limit reached")
+    manager=TaskManager(); task=manager.start(goal,max_steps=max_steps); task_id=task.task_id
     def worker():
-        try:
-            agent(goal, max_steps=max_steps, resume_task_id=task_id)
+        try: agent(goal,max_steps=max_steps,resume_task_id=task_id)
         finally:
-            with _AGENT_THREADS_LOCK:
-                _AGENT_THREADS.pop(task_id, None)
-
-    thread = threading.Thread(target=worker, name=f"agent-{task_id}", daemon=True)
-    with _AGENT_THREADS_LOCK:
-        _AGENT_THREADS[task_id] = thread
-    thread.start()
-    return task_id
-
+            with _AGENT_THREADS_LOCK: _AGENT_THREADS.pop(task_id,None)
+    thread=threading.Thread(target=worker,name=f"agent-{task_id}",daemon=True)
+    with _AGENT_THREADS_LOCK: _AGENT_THREADS[task_id]=thread
+    thread.start(); return task_id
 
 class AgentRequestHandler(BaseHTTPRequestHandler):
-    server_version = "Agent1HTTP/1.1"
-
-    def log_message(self, format, *args):
-        return
-
-    def _send(self, status, payload):
-        body = _json_bytes(payload)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
-
+    server_version="Agent1HTTP/1.2"
+    def log_message(self,format,*args): return
+    def _send(self,status,payload,headers=None):
+        body=_json_bytes(payload); self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff")
+        for key,value in (headers or {}).items(): self.send_header(key,value)
+        self.end_headers(); self.wfile.write(body)
     def _read_json(self):
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 256 * 1024:
-                return None
-            raw = self.rfile.read(length)
-            value = json.loads(raw.decode("utf-8"))
-            return value if isinstance(value, dict) else None
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
-            return None
-
+            length=int(self.headers.get("Content-Length","0"));
+            if length<=0 or length>256*1024: return None
+            value=json.loads(self.rfile.read(length).decode("utf-8")); return value if isinstance(value,dict) else None
+        except (ValueError,UnicodeDecodeError,json.JSONDecodeError): return None
+    def _protected(self):
+        if _session_authorized(self.headers): return True
+        # Legacy bearer remains available only for /pair, never for task routes.
+        return False
     def do_GET(self):
-        path = urlparse(self.path).path
-        if _client_response(self, path):
-            return
-        if path == "/health":
-            self._send(200, {
-                "status": "ok",
-                "service": "agent1",
-                "secure_transport": isinstance(self.request, ssl.SSLSocket),
-            })
-            return
-
-        if not _authorized(self.headers):
-            self._send(401, {"error": "unauthorized"})
-            return
-
+        path=urlparse(self.path).path
+        if _client_response(self,path): return
+        if path=="/health": self._send(200,{"status":"ok","service":"agent1","secure_transport":isinstance(self.request,ssl.SSLSocket)}); return
+        if not self._protected(): self._send(401,{"error":"unauthorized"}); return
         if path.startswith("/tasks/"):
-            task_id = path[len("/tasks/"):].strip()
-            if not task_id or "/" in task_id:
-                self._send(400, {"error": "invalid task id"})
-                return
-            try:
-                task = TaskManager().store.load(task_id)
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                self._send(404, {"error": "task not found"})
-                return
-            self._send(200, _task_payload(task))
-            return
-
-        self._send(404, {"error": "not found"})
-
+            task_id=path[len("/tasks/"):].strip()
+            if not task_id or "/" in task_id: self._send(400,{"error":"invalid task id"}); return
+            try: task=TaskManager().store.load(task_id)
+            except (OSError,ValueError,TypeError,json.JSONDecodeError): self._send(404,{"error":"task not found"}); return
+            self._send(200,_task_payload(task)); return
+        self._send(404,{"error":"not found"})
     def do_POST(self):
-        path = urlparse(self.path).path
-        if not _authorized(self.headers):
-            self._send(401, {"error": "unauthorized"})
+        path=urlparse(self.path).path
+        if path=="/pair":
+            if not _authorized(self.headers): self._send(401,{"error":"unauthorized"}); return
+            session_id=_create_session()
+            self._send(200,{"status":"paired","expires_in":SESSION_TTL_SECONDS},{"Set-Cookie":f"agent_session={session_id}; Path=/; HttpOnly; Secure; SameSite=Strict"})
             return
+        if path=="/logout":
+            _revoke_session(self.headers)
+            self._send(200,{"status":"logged_out"},{"Set-Cookie":"agent_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"}); return
+        if not self._protected(): self._send(401,{"error":"unauthorized"}); return
+        if path!="/tasks": self._send(404,{"error":"not found"}); return
+        payload=self._read_json()
+        if payload is None: self._send(400,{"error":"invalid JSON body"}); return
+        goal=payload.get("goal"); max_steps=payload.get("max_steps",30)
+        if not isinstance(goal,str) or not goal.strip(): self._send(400,{"error":"goal must be a non-empty string"}); return
+        if len(goal)>MAX_GOAL_LENGTH: self._send(400,{"error":"goal is too long"}); return
+        if not isinstance(max_steps,int) or isinstance(max_steps,bool) or not 1<=max_steps<=100: self._send(400,{"error":"max_steps must be an integer from 1 to 100"}); return
+        try: task_id=_start_task(goal.strip(),max_steps)
+        except RuntimeError as exc: self._send(429,{"error":str(exc)}); return
+        except Exception as exc: self._send(500,{"error":f"{type(exc).__name__}: {exc}"}); return
+        self._send(202,{"task_id":task_id,"status":"running"})
 
-        if path != "/tasks":
-            self._send(404, {"error": "not found"})
-            return
-
-        payload = self._read_json()
-        if payload is None:
-            self._send(400, {"error": "invalid JSON body"})
-            return
-
-        goal = payload.get("goal")
-        max_steps = payload.get("max_steps", 30)
-        if not isinstance(goal, str) or not goal.strip():
-            self._send(400, {"error": "goal must be a non-empty string"})
-            return
-        if len(goal) > MAX_GOAL_LENGTH:
-            self._send(400, {"error": "goal is too long"})
-            return
-        if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not 1 <= max_steps <= 100:
-            self._send(400, {"error": "max_steps must be an integer from 1 to 100"})
-            return
-
-        try:
-            task_id = _start_task(goal.strip(), max_steps)
-        except RuntimeError as exc:
-            self._send(429, {"error": str(exc)})
-            return
-        except Exception as exc:
-            self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
-            return
-        self._send(202, {"task_id": task_id, "status": "running"})
-
-
-def serve(host=None, port=None, certfile=None, keyfile=None):
-    bind_host = host or os.environ.get("AGENT_API_HOST", DEFAULT_HOST)
-    bind_port = int(port or os.environ.get("AGENT_API_PORT", DEFAULT_PORT))
-    cert_path = certfile or os.environ.get("AGENT_API_CERT")
-    key_path = keyfile or os.environ.get("AGENT_API_KEY")
-    is_loopback = bind_host in {"127.0.0.1", "localhost", "::1"}
-
+def serve(host=None,port=None,certfile=None,keyfile=None):
+    bind_host=host or os.environ.get("AGENT_API_HOST","127.0.0.1"); bind_port=int(port or os.environ.get("AGENT_API_PORT",8787)); cert_path=certfile or os.environ.get("AGENT_API_CERT"); key_path=keyfile or os.environ.get("AGENT_API_KEY"); is_loopback=bind_host in {"127.0.0.1","localhost","::1"}
     _token()
-    if not is_loopback and not (cert_path and key_path):
-        raise RuntimeError(
-            "TLS certificate and key are required when AGENT_API_HOST is not loopback"
-        )
-
-    server = ThreadingHTTPServer((bind_host, bind_port), AgentRequestHandler)
+    if not is_loopback and not (cert_path and key_path): raise RuntimeError("TLS certificate and key are required when AGENT_API_HOST is not loopback")
+    httpd=ThreadingHTTPServer((bind_host,bind_port),AgentRequestHandler)
     if cert_path and key_path:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certfile=cert_path, keyfile=key_path)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); context.load_cert_chain(certfile=cert_path,keyfile=key_path); httpd.socket=context.wrap_socket(httpd.socket,server_side=True)
+    scheme="https" if cert_path and key_path else "http"; print(f"Agent 1 API listening on {scheme}://{bind_host}:{bind_port}")
+    try: httpd.serve_forever()
+    finally: httpd.server_close()
 
-    scheme = "https" if cert_path and key_path else "http"
-    print(f"Agent 1 API listening on {scheme}://{bind_host}:{bind_port}")
-    try:
-        server.serve_forever()
-    finally:
-        server.server_close()
-
-
-if __name__ == "__main__":
-    serve()
+if __name__=="__main__": serve()

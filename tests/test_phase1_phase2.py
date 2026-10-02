@@ -1,3 +1,4 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,8 +42,19 @@ class PcInspectionTests(unittest.TestCase):
         self.assertIn("pid", info)
 
     def test_process_listing_returns_data(self):
-        result = list_processes(3)
+        fake_process = type(
+            "FakeProcess",
+            (),
+            {
+                "stdout": io.StringIO('"python.exe","123","Console","1","10 K"\n'),
+                "stderr": io.StringIO(""),
+                "wait": lambda self, timeout=None: 0,
+            },
+        )()
+        with patch("tools.pc.subprocess.Popen", return_value=fake_process):
+            result = list_processes(3)
         self.assertFalse(result.startswith("ERROR:"))
+        self.assertIn("python.exe", result)
 
 
 if __name__ == "__main__":

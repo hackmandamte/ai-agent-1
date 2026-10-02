@@ -1,18 +1,22 @@
 import json
 from llm import UNKNOWN_TOOL_CALL_ID, ask
 from tools.shell import run
-from tools.files import read_file, write_file, list_files
+from tools.files import read_file, write_file, list_files, create_directory, copy_path, move_path, delete_path
 from tools.git import git_status, git_diff, git_log, git_commit
 from tools.approval import ask_approval
+from tools.policy import policy_result
 from tools.runtime import get_runtime_context
 from tools.web import web_fetch
 from tools.mcp import execute_mcp_tool, is_mcp_tool, close_all
 from tools.task_manager import TaskManager
-from tools.verify import verify_path_exists, verify_file_contains, verify_command
+from tools.verify import verify_path_exists, verify_file_contains, verify_command, verify_process_state, verify_job_state
 from tools.pc import (
-    system_info, list_processes, process_info, terminate_process,
+    system_info, list_processes, process_info, process_tree, terminate_process,
     launch_app, start_background_job, job_status,
 )
+from tools.jobs import start_job, get_job, list_jobs, job_output, stop_job, restart_job
+from tools.apps import discover_apps, launch_app_id
+from tools.system import disk_usage, network_state, listening_ports, environment_info
 
 UNKNOWN_TOOL_NAME = "unknown_tool"
 _ACTIVE_TASK_MANAGER = None
@@ -92,6 +96,34 @@ def parse_tool_arguments(function):
 
 def execute_tool(name, arguments):
     try:
+        required_args = {
+            "set_task_plan": ("steps",), "list_files": ("path",),
+            "read_file": ("path",), "write_file": ("path", "content"),
+            "create_directory": ("path",), "copy_path": ("source", "destination"),
+            "move_path": ("source", "destination"), "delete_path": ("path",),
+            "shell": ("command",), "git_commit": ("message",),
+            "web_fetch": ("url",), "verify_path_exists": ("path",),
+            "verify_file_contains": ("path", "text"), "verify_command": ("command",),
+            "process_info": ("pid",), "process_tree": ("pid",), "terminate_process": ("pid",),
+            "launch_app": ("command",), "launch_app_id": ("app_id",), "start_background_job": ("command",),
+            "job_status": ("pid",), "start_job": ("command",),
+            "get_job": ("job_id",), "job_output": ("job_id",),
+            "verify_job_state": ("job_id",),
+            "stop_job": ("job_id",), "restart_job": ("job_id",),
+        }
+        if name not in required_args and not is_mcp_tool(name) and name not in {
+            "git_status", "git_diff", "git_log", "get_runtime_info",
+            "system_info", "list_processes", "list_jobs", "discover_apps", "disk_usage", "network_state", "listening_ports", "environment_info", "verify_process_state",
+        }:
+            return f"ERROR: Unknown tool: {name}"
+        missing = [key for key in required_args.get(name, ()) if key not in arguments]
+        if missing:
+            return f"ERROR: Missing required argument(s) for {name}: {', '.join(missing)}"
+
+        risk, approval_required, approval_message = policy_result(name, arguments)
+        if approval_required and not ask_approval(approval_message):
+            return f"APPROVAL DENIED: {name} was not executed."
+
         if name == "set_task_plan":
             task_manager = _ACTIVE_TASK_MANAGER
             if task_manager is None:
@@ -125,10 +157,19 @@ def execute_tool(name, arguments):
             return read_file(arguments["path"])
 
         if name == "write_file":
-            return write_file(
-                arguments["path"],
-                arguments["content"]
-            )
+            return write_file(arguments["path"], arguments["content"])
+
+        if name == "create_directory":
+            return create_directory(arguments["path"])
+
+        if name == "copy_path":
+            return copy_path(arguments["source"], arguments["destination"])
+
+        if name == "move_path":
+            return move_path(arguments["source"], arguments["destination"])
+
+        if name == "delete_path":
+            return delete_path(arguments["path"])
 
         if name == "shell":
             return run(arguments["command"])
@@ -144,9 +185,6 @@ def execute_tool(name, arguments):
 
         if name == "git_commit":
             message = arguments["message"]
-
-            if not ask_approval(f"Git commit: {message}"):
-                return "APPROVAL DENIED: Git commit was not executed."
 
             return git_commit(message)
 
@@ -165,8 +203,26 @@ def execute_tool(name, arguments):
         if name == "verify_command":
             return verify_command(arguments["command"])
 
+        if name == "verify_process_state":
+            return verify_process_state(arguments["pid"], arguments.get("expected_running", True))
+
+        if name == "verify_job_state":
+            return verify_job_state(arguments["job_id"], arguments.get("expected_status"))
+
         if name == "system_info":
             return system_info()
+
+        if name == "disk_usage":
+            return disk_usage(arguments.get("path", "."))
+
+        if name == "network_state":
+            return network_state()
+
+        if name == "listening_ports":
+            return listening_ports(arguments.get("limit", 100))
+
+        if name == "environment_info":
+            return environment_info()
 
         if name == "list_processes":
             return list_processes(arguments.get("limit", 50))
@@ -174,17 +230,45 @@ def execute_tool(name, arguments):
         if name == "process_info":
             return process_info(arguments["pid"])
 
+        if name == "process_tree":
+            return process_tree(arguments["pid"], arguments.get("max_depth", 4))
+
         if name == "terminate_process":
             return terminate_process(arguments["pid"], arguments.get("force", False))
 
         if name == "launch_app":
             return launch_app(arguments["command"], arguments.get("wait", False))
 
+        if name == "discover_apps":
+            return discover_apps(arguments.get("query", ""), arguments.get("limit", 100))
+
+        if name == "launch_app_id":
+            return launch_app_id(arguments["app_id"])
+
         if name == "start_background_job":
             return start_background_job(arguments["command"])
 
         if name == "job_status":
             return job_status(arguments["pid"])
+
+        if name == "start_job":
+            return start_job(arguments["command"])
+
+        if name == "get_job":
+            record = get_job(arguments["job_id"])
+            return record if record is not None else f"ERROR: unknown job: {arguments['job_id']}"
+
+        if name == "list_jobs":
+            return list_jobs()
+
+        if name == "job_output":
+            return job_output(arguments["job_id"], arguments.get("limit", 8000))
+
+        if name == "stop_job":
+            return stop_job(arguments["job_id"])
+
+        if name == "restart_job":
+            return restart_job(arguments["job_id"])
 
         if is_mcp_tool(name):
             return execute_mcp_tool(name, arguments)
@@ -300,12 +384,19 @@ This runtime context is automatically detected at each agent run.
                 print(f"\n[TOOL ERROR] {name}")
                 print(f"[RESULT] Invalid tool arguments: {type(e).__name__}: {e}")
 
+                raw_args = function.get("arguments") if isinstance(function, dict) else None
+                expected = {
+                    "read_file": '{"path":"<file path>"}',
+                    "list_files": '{"path":"<directory path>"}',
+                    "write_file": '{"path":"<file path>","content":"<text>"}',
+                    "shell": '{"command":"<command>"}',
+                }.get(name, '{"...":"..."}')
                 error_content = (
-                    "ERROR: Invalid JSON tool arguments. "
-                    "Do not execute this tool call. "
-                    "Regenerate the tool call with valid JSON. "
-                    "Use a complete JSON object with double-quoted keys/strings. "
-                    f"Parser error: {type(e).__name__}: {e}"
+                    "ERROR: Invalid JSON tool arguments. Do not execute this tool call. Regenerate the tool call with valid JSON. "
+                    f"Tool: {name}. Parser error: {type(e).__name__}: {e}. "
+                    f"Malformed arguments: {raw_args!r}. Expected shape: {expected}. "
+                    "REGENERATE THE SAME TOOL CALL NOW. Return ONLY the JSON arguments object, "
+                    "with double-quoted keys and string values; no markdown and no explanation."
                 )
                 messages.append({
                     "role": "tool",
@@ -314,9 +405,20 @@ This runtime context is automatically detected at each agent run.
                     "content": error_content,
                 })
                 task_manager.record_tool_result(name, error_content)
+                # Give Qwen an explicit corrective user turn. The tool result records
+                # the failure; this message tells the model to regenerate rather than
+                # repeating the malformed call verbatim.
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Correct the previous {name} tool call. "
+                        f"Return ONLY valid JSON arguments matching this shape: {expected}. "
+                        "Use double quotes for every JSON key and string value. "
+                        "Do not include markdown, prose, or a code fence."
+                    ),
+                })
                 task_manager.save_messages(messages)
 
-                raw_args = function.get("arguments") if isinstance(function, dict) else None
                 signature = (name, str(raw_args))
                 invalid_attempts[signature] = invalid_attempts.get(signature, 0) + 1
                 if invalid_attempts[signature] >= 3:

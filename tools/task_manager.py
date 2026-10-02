@@ -174,7 +174,15 @@ class TaskManager:
         task = self._require_task()
         failed = isinstance(result, str) and (result.startswith("ERROR:") or result.startswith("APPROVAL DENIED:"))
         if name.startswith("verify_") and isinstance(result, str) and result.startswith("VERIFIED:"):
-            task.verified = True
+            # Verification output can represent either success or a verified negative.
+            # Only positive predicates may mark the task as verified.
+            positive = (
+                "exists=True" in result
+                or "contains=True" in result
+                or "match=True" in result
+            )
+            if positive:
+                task.verified = True
         if failed:
             task.retries += 1
             task.last_error = result[:2000]

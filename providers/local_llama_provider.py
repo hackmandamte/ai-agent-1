@@ -15,11 +15,20 @@ class LocalLlamaProvider:
         self.model = os.environ.get("LLAMA_MODEL", "Qwen3.5-4B-Q5_K_M")
     def discover_models(self): return [self.model]
     def call_model(self, model, messages):
-        payload = {"model": model, "messages": messages, "tools": self.tools, "temperature": 0.2, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False}}
+        payload = {"model": model, "messages": messages, "tools": self.tools, "temperature": 0.2, "max_tokens": 128, "chat_template_kwargs": {"enable_thinking": False}}
         try:
-            encoded = json.dumps(payload, ensure_ascii=False).replace("'", "''")
-            command = "$body='" + encoded + "'; Invoke-RestMethod -Uri '" + self.base_url + "/chat/completions' -Method Post -ContentType 'application/json' -Body $body | ConvertTo-Json -Depth 30 -Compress"
-            result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", command], capture_output=True, text=True, timeout=305, check=False)
+            encoded = json.dumps(payload, ensure_ascii=False)
+            # Keep the request body out of the PowerShell command line. Windows has
+            # a command-line length limit, and large tool schemas/history can exceed it.
+            command = "$body=[Console]::In.ReadToEnd(); Invoke-RestMethod -Uri '" + self.base_url + "/chat/completions' -Method Post -ContentType 'application/json' -Body $body | ConvertTo-Json -Depth 30 -Compress"
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", command],
+                input=encoded,
+                capture_output=True,
+                text=True,
+                timeout=305,
+                check=False,
+            )
             if result.returncode != 0: return {"status":"error", "error":result.stderr.strip() or result.stdout.strip()}
             return {"status":"response", "response":_LocalResponse(json.loads(result.stdout))}
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:

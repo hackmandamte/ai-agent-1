@@ -105,7 +105,8 @@ class MCPServer:
         self.start()
         result = self._request("tools/list", {})
         tools = result.get("tools", []) if isinstance(result, dict) else []
-        self.tools = [tool for tool in tools if isinstance(tool, dict) and isinstance(tool.get("name"), str)]
+        allowed = self.config.get("allowed_tools")
+        self.tools = [tool for tool in tools if isinstance(tool, dict) and isinstance(tool.get("name"), str) and (not isinstance(allowed, list) or tool["name"] in allowed)]
         return self.tools
 
     def call_tool(self, name, arguments):

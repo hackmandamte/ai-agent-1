@@ -42,3 +42,28 @@ def verify_command(command: str) -> str:
         f"VERIFIED: exit_code={result.returncode}\n"
         f"{result.stdout}{result.stderr}"
     )
+
+
+def verify_process_state(pid: int, expected_running: bool = True) -> str:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return "ERROR: invalid process PID"
+    if pid <= 0:
+        return "ERROR: invalid process PID"
+    try:
+        __import__("os").kill(pid, 0)
+        running = True
+    except OSError:
+        running = False
+    return f"VERIFIED: pid={pid} running={running} expected={expected_running} match={running == expected_running}"
+
+
+def verify_job_state(job_id: str, expected_status: str | None = None) -> str:
+    from .jobs import get_job
+    record = get_job(job_id)
+    if record is None:
+        return f"ERROR: unknown job: {job_id}"
+    status = record.get("status")
+    match = expected_status is None or status == expected_status
+    return f"VERIFIED: job_id={job_id} status={status} expected={expected_status} match={match} exit_code={record.get('exit_code')}"

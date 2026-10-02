@@ -12,7 +12,11 @@ TOOLS = [
     {"type":"function","function":{"name":"set_task_plan","description":"Create an ordered task plan with dependency relationships before complex work.","parameters":{"type":"object","properties":{"steps":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"goal":{"type":"string"},"depends_on":{"type":"array","items":{"type":"string"}}},"required":["id","goal"]}}},"required":["steps"]}}},
     {"type":"function","function":{"name":"list_files","description":"List files and directories.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
     {"type":"function","function":{"name":"read_file","description":"Read a text file.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
-    {"type":"function","function":{"name":"write_file","description":"Write complete text content to a file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
+    {"type":"function","function":{"name":"write_file","description":"Write complete text content to a file. Requires user approval.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
+    {"type":"function","function":{"name":"create_directory","description":"Create a workspace directory. Requires user approval.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+    {"type":"function","function":{"name":"copy_path","description":"Copy a workspace file or directory. Requires user approval.","parameters":{"type":"object","properties":{"source":{"type":"string"},"destination":{"type":"string"}},"required":["source","destination"]}}},
+    {"type":"function","function":{"name":"move_path","description":"Move or rename a workspace file or directory. Requires user approval.","parameters":{"type":"object","properties":{"source":{"type":"string"},"destination":{"type":"string"}},"required":["source","destination"]}}},
+    {"type":"function","function":{"name":"delete_path","description":"Delete a workspace file or directory. Requires user approval.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
     {"type":"function","function":{"name":"shell","description":"Run a shell command.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
     {"type":"function","function":{"name":"git_log","description":"Show recent Git commit history.","parameters":{"type":"object","properties":{}}}},
     {"type":"function","function":{"name":"git_commit","description":"Create a Git commit with all current changes. This is a high-impact action and requires user approval.","parameters":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}}},
@@ -21,14 +25,29 @@ TOOLS = [
     {"type":"function","function":{"name":"get_runtime_info","description":"Return runtime environment information.","parameters":{"type":"object","properties":{}}}},
     {"type":"function","function":{"name":"verify_path_exists","description":"Verify that a workspace path exists.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
     {"type":"function","function":{"name":"verify_file_contains","description":"Verify that a workspace text file contains exact text.","parameters":{"type":"object","properties":{"path":{"type":"string"},"text":{"type":"string"}},"required":["path","text"]}}},
-    {"type":"function","function":{"name":"verify_command","description":"Run a read-only verification command and report its exit code.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"verify_command","description":"Run a verification command and report its exit code. Requires user approval.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"verify_process_state","description":"Verify whether a process is currently running.","parameters":{"type":"object","properties":{"pid":{"type":"integer"},"expected_running":{"type":"boolean"}},"required":["pid"]}}},
+    {"type":"function","function":{"name":"verify_job_state","description":"Verify the persisted status and exit code of a background job.","parameters":{"type":"object","properties":{"job_id":{"type":"string"},"expected_status":{"type":"string"}},"required":["job_id"]}}},
     {"type":"function","function":{"name":"system_info","description":"Inspect basic PC runtime information.","parameters":{"type":"object","properties":{}}}},
+    {"type":"function","function":{"name":"disk_usage","description":"Inspect disk capacity and free space for a workspace path.","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}},
+    {"type":"function","function":{"name":"network_state","description":"Inspect Windows network interface configuration without changing it.","parameters":{"type":"object","properties":{}}}},
+    {"type":"function","function":{"name":"listening_ports","description":"List TCP listening ports and owning process IDs.","parameters":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":500}}}}},
+    {"type":"function","function":{"name":"environment_info","description":"Return sanitized non-secret runtime environment metadata.","parameters":{"type":"object","properties":{}}}},
     {"type":"function","function":{"name":"list_processes","description":"List running processes for inspection.","parameters":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200}}}}},
-    {"type":"function","function":{"name":"process_info","description":"Inspect one running process by PID.","parameters":{"type":"object","properties":{"pid":{"type":"integer"}},"required":["pid"]}}},
+    {"type":"function","function":{"name":"process_info","description":"Inspect one running process with parent, executable, command-line, and start metadata.","parameters":{"type":"object","properties":{"pid":{"type":"integer"}},"required":["pid"]}}},
+    {"type":"function","function":{"name":"process_tree","description":"Inspect the parent/child process tree rooted at a PID.","parameters":{"type":"object","properties":{"pid":{"type":"integer"},"max_depth":{"type":"integer","minimum":1,"maximum":8}},"required":["pid"]}}},
     {"type":"function","function":{"name":"terminate_process","description":"Terminate a process. Requires user approval.","parameters":{"type":"object","properties":{"pid":{"type":"integer"},"force":{"type":"boolean"}},"required":["pid"]}}},
-    {"type":"function","function":{"name":"launch_app","description":"Launch a PC application or command. Requires user approval.","parameters":{"type":"object","properties":{"command":{"type":"string"},"wait":{"type":"boolean"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"launch_app","description":"Legacy arbitrary application launch. Requires user approval.","parameters":{"type":"object","properties":{"command":{"type":"string"},"wait":{"type":"boolean"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"discover_apps","description":"Discover installed Windows Start-menu applications without launching them.","parameters":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500}}}}},
+    {"type":"function","function":{"name":"launch_app_id","description":"Launch a discovered Windows application by exact AppID. Requires user approval.","parameters":{"type":"object","properties":{"app_id":{"type":"string"}},"required":["app_id"]}}},
     {"type":"function","function":{"name":"start_background_job","description":"Start a long-running PC command in the background. Requires user approval.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
-    {"type":"function","function":{"name":"job_status","description":"Inspect a background job by PID.","parameters":{"type":"object","properties":{"pid":{"type":"integer"}},"required":["pid"]}}},
+    {"type":"function","function":{"name":"job_status","description":"Inspect a legacy background job by PID.","parameters":{"type":"object","properties":{"pid":{"type":"integer"}},"required":["pid"]}}},
+    {"type":"function","function":{"name":"start_job","description":"Start a persistent background job and return a stable job ID. Requires user approval.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"get_job","description":"Get persistent background job metadata by stable job ID.","parameters":{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}}},
+    {"type":"function","function":{"name":"list_jobs","description":"List persistent background jobs and their current status.","parameters":{"type":"object","properties":{}}}},
+    {"type":"function","function":{"name":"job_output","description":"Read captured stdout and stderr for a persistent job.","parameters":{"type":"object","properties":{"job_id":{"type":"string"},"limit":{"type":"integer","minimum":100,"maximum":20000}},"required":["job_id"]}}},
+    {"type":"function","function":{"name":"stop_job","description":"Stop a persistent background job by stable job ID. Requires user approval.","parameters":{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}}},
+    {"type":"function","function":{"name":"restart_job","description":"Restart a persistent background job by stable job ID. Requires user approval.","parameters":{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}}},
 ]
 
 _PROVIDER = LocalLlamaProvider()
@@ -57,11 +76,10 @@ def set_model_cooldown(model, delay):
 def sanitize_tool_arguments(raw):
     if not isinstance(raw, str) or not raw.strip():
         return "{}"
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        return "{}"
-    return raw if isinstance(value, dict) else "{}"
+    # Tool-call arguments are strings in the OpenAI-compatible schema. Preserve
+    # malformed JSON verbatim so the agent can show the model exactly what failed
+    # and request a corrected regeneration on the next turn.
+    return raw
 
 
 def normalize_tool_call(call, default_id=UNKNOWN_TOOL_CALL_ID, used_ids=None):

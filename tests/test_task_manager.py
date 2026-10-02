@@ -65,6 +65,27 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(loaded.status, "waiting")
         self.assertFalse(loaded.history[-1]["ok"])
 
+    def test_negative_verification_does_not_mark_task_verified(self):
+        temp, manager = self.make_manager()
+        self.addCleanup(temp.cleanup)
+
+        task = manager.start("verify something")
+        manager.begin_step(1)
+        manager.record_tool_result("verify_path_exists", "VERIFIED: exists=False path=missing.txt")
+        self.assertFalse(manager.store.load(task.task_id).verified)
+
+        manager.record_tool_result("verify_file_contains", "VERIFIED: contains=False path=file.txt")
+        self.assertFalse(manager.store.load(task.task_id).verified)
+
+    def test_positive_verification_marks_task_verified(self):
+        temp, manager = self.make_manager()
+        self.addCleanup(temp.cleanup)
+
+        task = manager.start("verify something")
+        manager.begin_step(1)
+        manager.record_tool_result("verify_process_state", "VERIFIED: pid=123 running=True expected=True match=True")
+        self.assertTrue(manager.store.load(task.task_id).verified)
+
     def test_completion_is_terminal(self):
         temp, manager = self.make_manager()
         self.addCleanup(temp.cleanup)

@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 
 WORKSPACE_ROOT = Path.cwd().resolve()
@@ -50,3 +51,45 @@ def list_files(path: str = ".") -> str:
         str(p.relative_to(WORKSPACE_ROOT))
         for p in safe_path(path).iterdir()
     )
+
+
+def create_directory(path: str) -> str:
+    target = safe_path(path)
+    target.mkdir(parents=True, exist_ok=True)
+    return f"DIRECTORY CREATED: {path}"
+
+
+def copy_path(source: str, destination: str) -> str:
+    src = safe_path(source)
+    dst = safe_path(destination)
+    if not src.exists():
+        return f"ERROR: source does not exist: {source}"
+    if src.is_dir():
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    return f"COPIED: {source} -> {destination}"
+
+
+def move_path(source: str, destination: str) -> str:
+    src = safe_path(source)
+    dst = safe_path(destination)
+    if not src.exists():
+        return f"ERROR: source does not exist: {source}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    return f"MOVED: {source} -> {destination}"
+
+
+def delete_path(path: str) -> str:
+    target = safe_path(path)
+    if target == WORKSPACE_ROOT:
+        return "ERROR: refusing to delete workspace root"
+    if not target.exists():
+        return f"ERROR: path does not exist: {path}"
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+    return f"DELETED: {path}"

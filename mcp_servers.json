@@ -1,3 +1,20 @@
-{
-  "servers": {}
+﻿{
+    "servers":  {
+                    "obscura":  {
+                                    "args":  [
+                                                 "mcp"
+                                             ],
+                                    "command":  "C:\\Users\\Admin\\Tools\\obscura\\runtime\\obscura.exe",
+                                    "allowed_tools":  [
+                                                          "browser_navigate",
+                                                          "browser_snapshot",
+                                                          "browser_click",
+                                                          "browser_fill",
+                                                          "browser_type",
+                                                          "browser_press_key",
+                                                          "browser_wait_for",
+                                                          "browser_close"
+                                                      ]
+                                }
+                }
 }

@@ -527,14 +527,18 @@ class RecoveryContinuesAfterMalformedCallTests(ToolCallRecoveryTestCase):
 
         second_step = result.snapshots[1]
 
-        self.assertEqual(second_step[-1]["role"], "tool")
-        self.assertEqual(second_step[-1]["tool_call_id"], "call_1")
-        self.assertEqual(second_step[-1]["name"], "shell")
-        self.assertIn("Invalid JSON tool arguments", second_step[-1]["content"])
+        tool_error = next(
+            message for message in second_step
+            if message.get("role") == "tool" and message.get("tool_call_id") == "call_1"
+        )
+        self.assertEqual(tool_error["name"], "shell")
+        self.assertIn("Invalid JSON tool arguments", tool_error["content"])
 
-        # The assistant message carrying tool_calls is still there for the model.
-        self.assertEqual(second_step[-2]["role"], "assistant")
-        self.assertTrue(second_step[-2]["tool_calls"])
+        # The assistant message carrying tool_calls is still there for the model,
+        # followed by an explicit corrective instruction.
+        self.assertTrue(any(message.get("role") == "assistant" and message.get("tool_calls") for message in second_step))
+        self.assertEqual(second_step[-1]["role"], "user")
+        self.assertIn("Return ONLY valid JSON arguments", second_step[-1]["content"])
 
     def test_repeated_malformed_calls_do_not_crash_across_steps(self):
         result = self.run_agent(

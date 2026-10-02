@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#111827">
+  <title>Agent 1</title>
+  <link rel="stylesheet" href="/client/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header><div><h1>Agent 1</h1><p>Remote task control</p></div><span id="health" class="badge">checking</span></header>
+    <section class="card">
+      <label for="base">API base</label>
+      <input id="base" autocomplete="url" placeholder="https://192.168.x.x:8787">
+      <label for="token">Bearer token</label>
+      <input id="token" type="password" autocomplete="off" placeholder="AGENT_API_TOKEN">
+      <div class="row"><button id="save">Save session</button><button id="clear" class="secondary">Clear</button></div>
+      <p class="hint">The token is kept only in this browser session and is never written to the Agent.</p>
+    </section>
+    <section class="card">
+      <label for="goal">Goal</label>
+      <textarea id="goal" rows="5" placeholder="Tell Agent 1 what to do..."></textarea>
+      <label for="steps">Max steps</label>
+      <input id="steps" type="number" min="1" max="100" value="30">
+      <button id="run">Start task</button>
+      <p id="message" class="message"></p>
+    </section>
+    <section id="taskCard" class="card hidden">
+      <div class="taskHead"><h2>Task</h2><span id="status" class="badge"></span></div>
+      <dl><dt>ID</dt><dd id="taskId"></dd><dt>Step</dt><dd id="step"></dd><dt>Verified</dt><dd id="verified"></dd></dl>
+      <h3>History</h3><pre id="history">Waiting...</pre>
+    </section>
+  </main>
+  <script src="/client/app.js" defer></script>
+</body>
+</html>

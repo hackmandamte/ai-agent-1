@@ -46,6 +46,15 @@ class ServerHelperTests(unittest.TestCase):
         self.assertNotIn("messages", payload)
         self.assertNotIn("result", payload)
 
+    def test_client_routes_are_whitelisted(self):
+        self.assertEqual(server._CLIENT_FILES["/"], "index.html")
+        self.assertEqual(server._CLIENT_FILES["/client/app.js"], "app.js")
+        self.assertNotIn("/client/../server.py", server._CLIENT_FILES)
+
+    def test_client_assets_exist(self):
+        for filename in server._CLIENT_FILES.values():
+            self.assertTrue((server._CLIENT_DIR / filename).is_file())
+
     def test_goal_limit_is_bounded(self):
         self.assertEqual(server.MAX_GOAL_LENGTH, 12000)
 

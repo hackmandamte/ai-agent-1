@@ -6,6 +6,7 @@ import os
 import secrets
 import ssl
 import threading
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -18,6 +19,14 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 _AGENT_THREADS = {}
 _AGENT_THREADS_LOCK = threading.Lock()
+_CLIENT_DIR = Path(__file__).resolve().parent / "client"
+_CLIENT_FILES = {
+    "/": "index.html",
+    "/client/index.html": "index.html",
+    "/client/app.js": "app.js",
+    "/client/style.css": "style.css",
+}
+_CLIENT_TYPES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
 
 
 def _token():
@@ -50,6 +59,26 @@ def _task_payload(task):
         "last_error": task.last_error,
         "history": task.history[-20:],
     }
+
+
+def _client_response(handler, path):
+    filename = _CLIENT_FILES.get(path)
+    if not filename:
+        return False
+    target = (_CLIENT_DIR / filename).resolve()
+    if target.parent != _CLIENT_DIR.resolve() or not target.is_file():
+        handler._send(404, {"error": "client asset not found"})
+        return True
+    body = target.read_bytes()
+    handler.send_response(200)
+    handler.send_header("Content-Type", _CLIENT_TYPES[filename])
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'")
+    handler.end_headers()
+    handler.wfile.write(body)
+    return True
 
 
 def _start_task(goal, max_steps):
@@ -105,6 +134,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if _client_response(self, path):
+            return
         if path == "/health":
             self._send(200, {
                 "status": "ok",

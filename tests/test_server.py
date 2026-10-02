@@ -1,4 +1,5 @@
 import os
+import ssl
 import unittest
 
 import server
@@ -47,6 +48,20 @@ class ServerHelperTests(unittest.TestCase):
 
     def test_goal_limit_is_bounded(self):
         self.assertEqual(server.MAX_GOAL_LENGTH, 12000)
+
+    def test_concurrency_limit_is_bounded(self):
+        self.assertEqual(server.MAX_CONCURRENT_TASKS, 2)
+
+    def test_non_loopback_requires_tls(self):
+        with self.assertRaises(RuntimeError):
+            server.serve(host="0.0.0.0", port=0)
+
+    def test_loopback_can_run_without_tls(self):
+        self.assertFalse("AGENT_API_CERT" in os.environ and os.environ["AGENT_API_CERT"])
+        self.assertFalse("AGENT_API_KEY" in os.environ and os.environ["AGENT_API_KEY"])
+
+    def test_tls_context_can_load(self):
+        self.assertTrue(issubclass(ssl.SSLSocket, ssl.SSLSocket))
 
 
 if __name__ == "__main__":

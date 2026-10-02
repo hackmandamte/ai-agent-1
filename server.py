@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -12,6 +13,7 @@ from agent import agent
 from tools.task_manager import TaskManager
 
 MAX_GOAL_LENGTH = 12000
+MAX_CONCURRENT_TASKS = 2
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 _AGENT_THREADS = {}
@@ -51,6 +53,11 @@ def _task_payload(task):
 
 
 def _start_task(goal, max_steps):
+    with _AGENT_THREADS_LOCK:
+        active = [thread for thread in _AGENT_THREADS.values() if thread.is_alive()]
+        if len(active) >= MAX_CONCURRENT_TASKS:
+            raise RuntimeError("maximum concurrent task limit reached")
+
     manager = TaskManager()
     task = manager.start(goal, max_steps=max_steps)
     task_id = task.task_id
@@ -67,8 +74,10 @@ def _start_task(goal, max_steps):
         _AGENT_THREADS[task_id] = thread
     thread.start()
     return task_id
+
+
 class AgentRequestHandler(BaseHTTPRequestHandler):
-    server_version = "Agent1HTTP/1.0"
+    server_version = "Agent1HTTP/1.1"
 
     def log_message(self, format, *args):
         return
@@ -79,6 +88,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
@@ -96,7 +106,11 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
-            self._send(200, {"status": "ok", "service": "agent1"})
+            self._send(200, {
+                "status": "ok",
+                "service": "agent1",
+                "secure_transport": isinstance(self.request, ssl.SSLSocket),
+            })
             return
 
         if not _authorized(self.headers):
@@ -147,18 +161,36 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
 
         try:
             task_id = _start_task(goal.strip(), max_steps)
+        except RuntimeError as exc:
+            self._send(429, {"error": str(exc)})
+            return
         except Exception as exc:
             self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
             return
         self._send(202, {"task_id": task_id, "status": "running"})
 
 
-def serve(host=None, port=None):
+def serve(host=None, port=None, certfile=None, keyfile=None):
     bind_host = host or os.environ.get("AGENT_API_HOST", DEFAULT_HOST)
     bind_port = int(port or os.environ.get("AGENT_API_PORT", DEFAULT_PORT))
+    cert_path = certfile or os.environ.get("AGENT_API_CERT")
+    key_path = keyfile or os.environ.get("AGENT_API_KEY")
+    is_loopback = bind_host in {"127.0.0.1", "localhost", "::1"}
+
     _token()
+    if not is_loopback and not (cert_path and key_path):
+        raise RuntimeError(
+            "TLS certificate and key are required when AGENT_API_HOST is not loopback"
+        )
+
     server = ThreadingHTTPServer((bind_host, bind_port), AgentRequestHandler)
-    print(f"Agent 1 API listening on http://{bind_host}:{bind_port}")
+    if cert_path and key_path:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+
+    scheme = "https" if cert_path and key_path else "http"
+    print(f"Agent 1 API listening on {scheme}://{bind_host}:{bind_port}")
     try:
         server.serve_forever()
     finally:

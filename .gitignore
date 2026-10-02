@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .env
 mcp_servers.local.json
+.agent_state/

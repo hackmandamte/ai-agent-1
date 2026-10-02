@@ -7,6 +7,7 @@ from tools.approval import ask_approval
 from tools.runtime import get_runtime_context
 from tools.web import web_fetch
 from tools.mcp import execute_mcp_tool, is_mcp_tool, close_all
+from tools.task_manager import TaskManager
 
 UNKNOWN_TOOL_NAME = "unknown_tool"
 
@@ -110,6 +111,10 @@ def execute_tool(name, arguments):
 
 
 def agent(goal, max_steps=30):
+    # The task manager persists orchestration state independently of the LLM.
+    task_manager = TaskManager()
+    task = task_manager.start(goal, max_steps=max_steps)
+
     # Get runtime context at startup
     runtime_context = get_runtime_context()
 
@@ -126,7 +131,9 @@ Use tools whenever necessary. You have read-only internet access through web_fet
 You may also have MCP tools. MCP tool names begin with mcp__ and are external services;
 use them when they are relevant to the user's goal.
 
-Do not claim something is done unless you actually performed it.
+Treat the goal as a multi-step task. Break work into concrete tool actions, inspect each
+result, recover from errors when possible, and verify the requested outcome before
+finishing. Do not claim something is done unless you actually performed and verified it.
 
 === RUNTIME ENVIRONMENT CONTEXT ===
 Operating System: {runtime_context['os']}
@@ -143,14 +150,17 @@ This runtime context is automatically detected at each agent run.
 
     for step in range(max_steps):
         print(f"\n===== STEP {step + 1} =====")
+        task_manager.begin_step(step + 1)
 
         message = ask(messages)
 
         tool_calls = message.get("tool_calls", [])
 
         if not tool_calls:
+            final_content = message.get("content", "")
             print("\nAGENT:")
-            print(message.get("content", ""))
+            print(final_content)
+            task_manager.complete(final_content)
             return
 
         messages.append(message)
@@ -178,17 +188,19 @@ This runtime context is automatically detected at each agent run.
                 print(f"\n[TOOL ERROR] {name}")
                 print(f"[RESULT] Invalid tool arguments: {type(e).__name__}: {e}")
 
+                error_content = (
+                    "ERROR: Invalid JSON tool arguments. "
+                    "Do not execute this tool call. "
+                    "Regenerate the tool call with valid JSON. "
+                    f"Parser error: {type(e).__name__}: {e}"
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
                     "name": name,
-                    "content": (
-                        "ERROR: Invalid JSON tool arguments. "
-                        "Do not execute this tool call. "
-                        "Regenerate the tool call with valid JSON. "
-                        f"Parser error: {type(e).__name__}: {e}"
-                    )
+                    "content": error_content,
                 })
+                task_manager.record_tool_result(name, error_content)
 
                 continue
 
@@ -199,6 +211,7 @@ This runtime context is automatically detected at each agent run.
 
             print("[RESULT]")
             print(result)
+            task_manager.record_tool_result(name, result)
 
             messages.append({
                 "role": "tool",
@@ -207,6 +220,7 @@ This runtime context is automatically detected at each agent run.
                 "content": result
             })
 
+    task_manager.fail(f"Maximum steps reached: {max_steps}")
     print("\nAgent reached maximum steps.")
 
 

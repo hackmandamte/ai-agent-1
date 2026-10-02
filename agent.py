@@ -16,6 +16,32 @@ from tools.pc import (
 
 UNKNOWN_TOOL_NAME = "unknown_tool"
 _ACTIVE_TASK_MANAGER = None
+MAX_MODEL_MESSAGES = 8
+MAX_TOOL_RESULT_CHARS = 1200
+MAX_ASSISTANT_CHARS = 1200
+
+
+def compact_messages(messages):
+    """Keep the model context bounded while preserving the active tool turn."""
+    if not isinstance(messages, list) or len(messages) <= MAX_MODEL_MESSAGES + 2:
+        return messages
+
+    prefix = messages[:2]
+    tail = messages[-MAX_MODEL_MESSAGES:]
+    while tail and tail[0].get("role") == "tool":
+        tail.pop(0)
+
+    compacted = prefix + tail
+    output = []
+    for message in compacted:
+        item = dict(message)
+        role = item.get("role")
+        if role == "tool":
+            item["content"] = str(item.get("content", ""))[:MAX_TOOL_RESULT_CHARS]
+        elif role == "assistant":
+            item["content"] = str(item.get("content", ""))[:MAX_ASSISTANT_CHARS]
+        output.append(item)
+    return output
 
 
 def describe_tool_call(call):
@@ -38,13 +64,7 @@ def describe_tool_call(call):
 
 
 def parse_tool_arguments(function):
-    """Return the decoded arguments dict for a tool call's function payload.
-
-    Missing/None arguments default to an empty object (so no-argument tools
-    such as git_status still work). Raises TypeError/ValueError --
-    json.JSONDecodeError being a ValueError -- when the arguments are not a
-    JSON string or do not decode to a JSON object.
-    """
+    """Decode model tool arguments strictly as a JSON object."""
     raw_arguments = function.get("arguments")
 
     if raw_arguments is None:
@@ -56,7 +76,10 @@ def parse_tool_arguments(function):
             f"got {type(raw_arguments).__name__}"
         )
 
-    arguments = json.loads(raw_arguments)
+    try:
+        arguments = json.loads(raw_arguments)
+    except json.JSONDecodeError as json_error:
+        raise json_error
 
     if not isinstance(arguments, dict):
         raise ValueError(
@@ -177,8 +200,15 @@ def agent(goal, max_steps=30, resume_task_id=None):
     global _ACTIVE_TASK_MANAGER
     task_manager = TaskManager()
     _ACTIVE_TASK_MANAGER = task_manager
+    resume_words = ("continue", "resume", "already started", "active task", "started a task")
+    wants_resume = any(word in goal.lower() for word in resume_words)
     if resume_task_id:
         task = task_manager.resume(resume_task_id)
+        goal = task.goal
+        messages = task.messages
+    elif wants_resume and task_manager.find_resumable(goal) is not None:
+        resumable = task_manager.find_resumable(goal)
+        task = task_manager.resume(resumable.task_id)
         goal = task.goal
         messages = task.messages
     else:
@@ -222,11 +252,14 @@ This runtime context is automatically detected at each agent run.
         messages = [system_message, {"role": "user", "content": goal}]
         task_manager.save_messages(messages)
 
+    invalid_attempts = {}
+
     for step in range(max_steps):
         print(f"\n===== STEP {step + 1} =====")
         task_manager.begin_step(step + 1)
 
-        message = ask(messages)
+        model_messages = compact_messages(messages)
+        message = ask(model_messages)
 
         tool_calls = message.get("tool_calls", [])
 
@@ -234,7 +267,10 @@ This runtime context is automatically detected at each agent run.
             final_content = message.get("content", "")
             print("\nAGENT:")
             print(final_content)
-            task_manager.complete(final_content)
+            if isinstance(final_content, str) and final_content.startswith("Local Qwen failed:"):
+                task_manager.fail(final_content)
+            else:
+                task_manager.complete(final_content)
             return
 
         messages.append(message)
@@ -243,6 +279,7 @@ This runtime context is automatically detected at each agent run.
         for call in tool_calls:
             name, tool_call_id = describe_tool_call(call)
 
+            function = None
             try:
                 if not isinstance(call, dict):
                     raise TypeError("Tool call must be an object")
@@ -267,6 +304,7 @@ This runtime context is automatically detected at each agent run.
                     "ERROR: Invalid JSON tool arguments. "
                     "Do not execute this tool call. "
                     "Regenerate the tool call with valid JSON. "
+                    "Use a complete JSON object with double-quoted keys/strings. "
                     f"Parser error: {type(e).__name__}: {e}"
                 )
                 messages.append({
@@ -278,12 +316,22 @@ This runtime context is automatically detected at each agent run.
                 task_manager.record_tool_result(name, error_content)
                 task_manager.save_messages(messages)
 
+                raw_args = function.get("arguments") if isinstance(function, dict) else None
+                signature = (name, str(raw_args))
+                invalid_attempts[signature] = invalid_attempts.get(signature, 0) + 1
+                if invalid_attempts[signature] >= 3:
+                    failure = f"Tool call recovery exhausted for {name} after 3 identical invalid attempts."
+                    task_manager.fail(failure)
+                    print(f"\nAGENT: {failure}")
+                    return
+
                 continue
 
             print(f"\n[TOOL] {name}")
             print(f"[ARGS] {arguments}")
 
             result = execute_tool(name, arguments)
+            result = result if isinstance(result, str) else str(result)
 
             print("[RESULT]")
             print(result)

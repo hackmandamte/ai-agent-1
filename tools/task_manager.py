@@ -75,6 +75,14 @@ class TaskStore:
                 continue
         return records
 
+    def active(self) -> list[TaskRecord]:
+        """Return non-terminal tasks, newest first."""
+        return sorted(
+            [task for task in self.list() if task.status in ACTIVE_STATES],
+            key=lambda task: task.updated_at,
+            reverse=True,
+        )
+
 
 class TaskManager:
     """Owns lifecycle transitions for a single multi-step agent task."""
@@ -85,12 +93,38 @@ class TaskManager:
 
     def resume(self, task_id: str) -> TaskRecord:
         task = self.store.load(task_id)
-        if task.status in TERMINAL_STATES:
+        recoverable_completion = (
+            task.status == "completed"
+            and task.retries > 0
+            and not task.verified
+        )
+        if task.status in TERMINAL_STATES and not recoverable_completion:
             raise ValueError(f"Task {task_id} is already {task.status}")
         task.status = "running"
         self.task = task
         self.store.save(task)
         return task
+
+    def latest_active(self) -> TaskRecord | None:
+        """Return the newest resumable task, including recoverable false completions."""
+        candidates = self.store.active() + [
+            task for task in self.store.list()
+            if task.status == "completed" and task.retries > 0 and not task.verified
+        ]
+        return max(candidates, key=lambda task: task.updated_at) if candidates else None
+
+    def find_resumable(self, goal: str) -> TaskRecord | None:
+        """Prefer an exact goal match, then fall back to the newest resumable task."""
+        candidates = self.store.active() + [
+            task for task in self.store.list()
+            if task.status == "completed" and task.retries > 0 and not task.verified
+        ]
+        if not candidates:
+            return None
+        for task in sorted(candidates, key=lambda item: item.updated_at, reverse=True):
+            if task.goal.strip() == goal.strip():
+                return task
+        return max(candidates, key=lambda task: task.updated_at)
 
     def start(self, goal: str, max_steps: int = 30, retry_budget: int = 2) -> TaskRecord:
         task = TaskRecord(

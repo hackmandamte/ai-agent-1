@@ -9,6 +9,7 @@ LOCAL_LLAMA = "local_llama"
 UNKNOWN_TOOL_CALL_ID = "unknown"
 
 TOOLS = [
+    {"type":"function","function":{"name":"set_task_plan","description":"Create an ordered task plan with dependency relationships before complex work.","parameters":{"type":"object","properties":{"steps":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"goal":{"type":"string"},"depends_on":{"type":"array","items":{"type":"string"}}},"required":["id","goal"]}}},"required":["steps"]}}},
     {"type":"function","function":{"name":"list_files","description":"List files and directories.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
     {"type":"function","function":{"name":"read_file","description":"Read a text file.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
     {"type":"function","function":{"name":"write_file","description":"Write complete text content to a file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
@@ -18,6 +19,16 @@ TOOLS = [
     {"type":"function","function":{"name":"git_status","description":"Show git working tree status.","parameters":{"type":"object","properties":{}}}},
     {"type":"function","function":{"name":"git_diff","description":"Show current git changes.","parameters":{"type":"object","properties":{}}}},
     {"type":"function","function":{"name":"get_runtime_info","description":"Return runtime environment information.","parameters":{"type":"object","properties":{}}}},
+    {"type":"function","function":{"name":"verify_path_exists","description":"Verify that a workspace path exists.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+    {"type":"function","function":{"name":"verify_file_contains","description":"Verify that a workspace text file contains exact text.","parameters":{"type":"object","properties":{"path":{"type":"string"},"text":{"type":"string"}},"required":["path","text"]}}},
+    {"type":"function","function":{"name":"verify_command","description":"Run a read-only verification command and report its exit code.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"system_info","description":"Inspect basic PC runtime information.","parameters":{"type":"object","properties":{}}}},
+    {"type":"function","function":{"name":"list_processes","description":"List running processes for inspection.","parameters":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200}}}}},
+    {"type":"function","function":{"name":"process_info","description":"Inspect one running process by PID.","parameters":{"type":"object","properties":{"pid":{"type":"integer"}},"required":["pid"]}}},
+    {"type":"function","function":{"name":"terminate_process","description":"Terminate a process. Requires user approval.","parameters":{"type":"object","properties":{"pid":{"type":"integer"},"force":{"type":"boolean"}},"required":["pid"]}}},
+    {"type":"function","function":{"name":"launch_app","description":"Launch a PC application or command. Requires user approval.","parameters":{"type":"object","properties":{"command":{"type":"string"},"wait":{"type":"boolean"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"start_background_job","description":"Start a long-running PC command in the background. Requires user approval.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"job_status","description":"Inspect a background job by PID.","parameters":{"type":"object","properties":{"pid":{"type":"integer"}},"required":["pid"]}}},
 ]
 
 _PROVIDER = LocalLlamaProvider()

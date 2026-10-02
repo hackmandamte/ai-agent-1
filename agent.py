@@ -8,8 +8,14 @@ from tools.runtime import get_runtime_context
 from tools.web import web_fetch
 from tools.mcp import execute_mcp_tool, is_mcp_tool, close_all
 from tools.task_manager import TaskManager
+from tools.verify import verify_path_exists, verify_file_contains, verify_command
+from tools.pc import (
+    system_info, list_processes, process_info, terminate_process,
+    launch_app, start_background_job, job_status,
+)
 
 UNKNOWN_TOOL_NAME = "unknown_tool"
+_ACTIVE_TASK_MANAGER = None
 
 
 def describe_tool_call(call):
@@ -63,6 +69,32 @@ def parse_tool_arguments(function):
 
 def execute_tool(name, arguments):
     try:
+        if name == "set_task_plan":
+            task_manager = _ACTIVE_TASK_MANAGER
+            if task_manager is None:
+                return "ERROR: task manager unavailable"
+            steps = arguments["steps"]
+            if not isinstance(steps, list) or not steps:
+                return "ERROR: task plan must contain at least one step"
+            normalized = []
+            ids = set()
+            for index, item in enumerate(steps, 1):
+                if not isinstance(item, dict) or not item.get("id") or not item.get("goal"):
+                    return "ERROR: each plan step needs id and goal"
+                step_id = str(item["id"])
+                if step_id in ids:
+                    return f"ERROR: duplicate plan step id: {step_id}"
+                ids.add(step_id)
+                deps = item.get("depends_on", [])
+                if not isinstance(deps, list) or any(dep == step_id for dep in deps):
+                    return f"ERROR: invalid dependencies for plan step: {step_id}"
+                normalized.append({"id": step_id, "goal": str(item["goal"]), "depends_on": deps, "status": "pending"})
+            unknown = [dep for item in normalized for dep in item["depends_on"] if dep not in ids]
+            if unknown:
+                return f"ERROR: unknown plan dependency: {unknown[0]}"
+            task_manager.set_plan(normalized)
+            return f"PLAN SET: {len(normalized)} steps"
+
         if name == "list_files":
             return list_files(arguments["path"])
 
@@ -101,6 +133,36 @@ def execute_tool(name, arguments):
         if name == "web_fetch":
             return web_fetch(arguments["url"])
 
+        if name == "verify_path_exists":
+            return verify_path_exists(arguments["path"])
+
+        if name == "verify_file_contains":
+            return verify_file_contains(arguments["path"], arguments["text"])
+
+        if name == "verify_command":
+            return verify_command(arguments["command"])
+
+        if name == "system_info":
+            return system_info()
+
+        if name == "list_processes":
+            return list_processes(arguments.get("limit", 50))
+
+        if name == "process_info":
+            return process_info(arguments["pid"])
+
+        if name == "terminate_process":
+            return terminate_process(arguments["pid"], arguments.get("force", False))
+
+        if name == "launch_app":
+            return launch_app(arguments["command"], arguments.get("wait", False))
+
+        if name == "start_background_job":
+            return start_background_job(arguments["command"])
+
+        if name == "job_status":
+            return job_status(arguments["pid"])
+
         if is_mcp_tool(name):
             return execute_mcp_tool(name, arguments)
 
@@ -110,10 +172,18 @@ def execute_tool(name, arguments):
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-def agent(goal, max_steps=30):
+def agent(goal, max_steps=30, resume_task_id=None):
     # The task manager persists orchestration state independently of the LLM.
+    global _ACTIVE_TASK_MANAGER
     task_manager = TaskManager()
-    task = task_manager.start(goal, max_steps=max_steps)
+    _ACTIVE_TASK_MANAGER = task_manager
+    if resume_task_id:
+        task = task_manager.resume(resume_task_id)
+        goal = task.goal
+        messages = task.messages
+    else:
+        task = task_manager.start(goal, max_steps=max_steps)
+        messages = None
 
     # Get runtime context at startup
     runtime_context = get_runtime_context()
@@ -131,9 +201,11 @@ Use tools whenever necessary. You have read-only internet access through web_fet
 You may also have MCP tools. MCP tool names begin with mcp__ and are external services;
 use them when they are relevant to the user's goal.
 
-Treat the goal as a multi-step task. Break work into concrete tool actions, inspect each
-result, recover from errors when possible, and verify the requested outcome before
-finishing. Do not claim something is done unless you actually performed and verified it.
+Treat the goal as a multi-step task. For complex work, create a task plan with
+set_task_plan before execution. Respect dependencies, inspect every result, recover
+from errors with a changed approach, and use a verification tool before claiming success.
+Task state is checkpointed and can be resumed. Do not claim something is done unless
+you actually performed and verified it.
 
 === RUNTIME ENVIRONMENT CONTEXT ===
 Operating System: {runtime_context['os']}
@@ -146,7 +218,9 @@ This runtime context is automatically detected at each agent run.
 """
     }
 
-    messages = [system_message, {"role": "user", "content": goal}]
+    if messages is None:
+        messages = [system_message, {"role": "user", "content": goal}]
+        task_manager.save_messages(messages)
 
     for step in range(max_steps):
         print(f"\n===== STEP {step + 1} =====")
@@ -164,6 +238,7 @@ This runtime context is automatically detected at each agent run.
             return
 
         messages.append(message)
+        task_manager.save_messages(messages)
 
         for call in tool_calls:
             name, tool_call_id = describe_tool_call(call)
@@ -201,6 +276,7 @@ This runtime context is automatically detected at each agent run.
                     "content": error_content,
                 })
                 task_manager.record_tool_result(name, error_content)
+                task_manager.save_messages(messages)
 
                 continue
 
@@ -219,6 +295,7 @@ This runtime context is automatically detected at each agent run.
                 "name": name,
                 "content": result
             })
+            task_manager.save_messages(messages)
 
     task_manager.fail(f"Maximum steps reached: {max_steps}")
     print("\nAgent reached maximum steps.")
@@ -239,6 +316,10 @@ if __name__ == "__main__":
         nargs="*",
         help="Goal for the coding agent",
     )
+    parser.add_argument(
+        "--resume",
+        help="Resume a persisted task by task ID",
+    )
 
     args = parser.parse_args()
 
@@ -249,4 +330,4 @@ if __name__ == "__main__":
     if args.max_steps < 1:
         parser.error("--max-steps must be at least 1")
 
-    agent(goal, max_steps=args.max_steps)
+    agent(goal, max_steps=args.max_steps, resume_task_id=args.resume)

@@ -35,6 +35,9 @@ class TaskRecord:
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     last_error: str | None = None
+    verified: bool = False
+    plan: list[dict] = field(default_factory=list)
+    messages: list[dict] = field(default_factory=list)
     history: list[dict] = field(default_factory=list)
 
     def snapshot(self) -> dict:
@@ -80,6 +83,15 @@ class TaskManager:
         self.store = store or TaskStore()
         self.task: TaskRecord | None = None
 
+    def resume(self, task_id: str) -> TaskRecord:
+        task = self.store.load(task_id)
+        if task.status in TERMINAL_STATES:
+            raise ValueError(f"Task {task_id} is already {task.status}")
+        task.status = "running"
+        self.task = task
+        self.store.save(task)
+        return task
+
     def start(self, goal: str, max_steps: int = 30, retry_budget: int = 2) -> TaskRecord:
         task = TaskRecord(
             task_id=uuid.uuid4().hex,
@@ -92,6 +104,31 @@ class TaskManager:
         self.store.save(task)
         return task
 
+    def set_plan(self, steps: list[dict]) -> None:
+        task = self._require_task()
+        task.plan = steps
+        task.history.append({"event": "plan_set", "count": len(steps), "at": _now()})
+        self.store.save(task)
+
+    def update_plan_step(self, step_id: str, status: str) -> None:
+        task = self._require_task()
+        for item in task.plan:
+            if item.get("id") == step_id:
+                item["status"] = status
+                break
+        self.store.save(task)
+
+    def save_messages(self, messages: list[dict]) -> None:
+        task = self._require_task()
+        task.messages = messages
+        self.store.save(task)
+
+    def mark_verified(self) -> None:
+        task = self._require_task()
+        task.verified = True
+        task.history.append({"event": "verified", "at": _now()})
+        self.store.save(task)
+
     def begin_step(self, step: int) -> None:
         task = self._require_task()
         task.current_step = step
@@ -102,6 +139,8 @@ class TaskManager:
     def record_tool_result(self, name: str, result: str) -> bool:
         task = self._require_task()
         failed = isinstance(result, str) and (result.startswith("ERROR:") or result.startswith("APPROVAL DENIED:"))
+        if name.startswith("verify_") and isinstance(result, str) and result.startswith("VERIFIED:"):
+            task.verified = True
         if failed:
             task.retries += 1
             task.last_error = result[:2000]

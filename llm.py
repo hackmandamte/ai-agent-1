@@ -241,9 +241,37 @@ def _message_from_result(provider, name, result):
     except ValueError:
         return None, 'invalid JSON response'
     choices = data.get('choices') if isinstance(data, dict) else None
-    if choices and isinstance(choices[0].get('message'), dict):
-        return choices[0]['message'], None
-    return None, 'response contained no choices'
+    if not (choices and isinstance(choices[0].get('message'), dict)):
+        return None, 'response contained no choices'
+    message = choices[0]['message']
+
+    # Compatibility path for Qwen3.5 prompt_json mode. This bypasses
+    # llama-server's native tool grammar while retaining Agent 1's typed
+    # execution, policy, approval, and verification boundary.
+    content = message.get('content')
+    if isinstance(content, str) and provider.tool_mode in {'prompt_json', 'json', 'compat'}:
+        try:
+            candidate = json.loads(content.strip())
+        except (TypeError, ValueError):
+            candidate = None
+        if isinstance(candidate, dict) and isinstance(candidate.get('tool'), str):
+            arguments = candidate.get('arguments', {})
+            if not isinstance(arguments, dict):
+                arguments = {}
+            return {
+                'role': 'assistant',
+                'content': '',
+                'tool_calls': [{
+                    'id': 'qwen_prompt_1',
+                    'type': 'function',
+                    'function': {
+                        'name': candidate['tool'],
+                        'arguments': json.dumps(arguments, ensure_ascii=False),
+                    },
+                }],
+            }, None
+
+    return message, None
 
 def ask(messages):
     request_messages = sanitize_messages_for_request(messages)

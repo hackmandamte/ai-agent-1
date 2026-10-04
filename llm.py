@@ -76,9 +76,10 @@ def set_model_cooldown(model, delay):
 def sanitize_tool_arguments(raw):
     if not isinstance(raw, str) or not raw.strip():
         return "{}"
-    # Tool-call arguments are strings in the OpenAI-compatible schema. Preserve
-    # malformed JSON verbatim so the agent can show the model exactly what failed
-    # and request a corrected regeneration on the next turn.
+
+    # Tool-call arguments are strings in the OpenAI-compatible schema.
+    # Preserve malformed JSON verbatim so the agent can show the model
+    # exactly what failed and request a corrected regeneration.
     return raw
 
 
@@ -86,44 +87,60 @@ def normalize_tool_call(call, default_id=UNKNOWN_TOOL_CALL_ID, used_ids=None):
     result = {
         "id": default_id,
         "type": "function",
-        "function": {"name": "unknown_tool", "arguments": "{}"},
+        "function": {
+            "name": "unknown_tool",
+            "arguments": "{}",
+        },
     }
+
     if isinstance(call, dict):
         raw_id = call.get("id")
         if isinstance(raw_id, str) and raw_id.strip():
             result["id"] = raw_id
+
         function = call.get("function")
         if isinstance(function, dict):
             name = function.get("name")
             if isinstance(name, str) and name:
                 result["function"]["name"] = name
-            result["function"]["arguments"] = sanitize_tool_arguments(function.get("arguments"))
+
+            result["function"]["arguments"] = sanitize_tool_arguments(
+                function.get("arguments")
+            )
+
     if used_ids is not None:
         original = result["id"]
         candidate = original
         counter = 2
+
         while candidate in used_ids:
             candidate = f"{original}_{counter}"
             counter += 1
+
         result["id"] = candidate
         used_ids.add(candidate)
+
     return result
 
 
 def _tool_content(content):
     if isinstance(content, str):
         return content if content.strip() else "(empty tool result)"
+
     if content is None:
         return "(empty tool result)"
+
     try:
         encoded = json.dumps(content, ensure_ascii=False)
     except (TypeError, ValueError):
         encoded = str(content)
+
     return encoded if encoded.strip() else "(empty tool result)"
+
+
 def sanitize_messages_for_request(history):
     output = []
     pending_calls = {}
-    used_ids = set()
 
     for message in history if isinstance(history, list) else []:
         if not isinstance(message, dict):
@@ -132,7 +149,11 @@ def sanitize_messages_for_request(history):
         role = message.get("role")
 
         if role == "assistant":
-            clean = {"role": "assistant", "content": message.get("content") or ""}
+            clean = {
+                "role": "assistant",
+                "content": message.get("content") or "",
+            }
+
             calls = message.get("tool_calls")
             pending_calls = {}
 
@@ -141,14 +162,15 @@ def sanitize_messages_for_request(history):
                 turn_ids = set()
 
                 for call in calls:
-                    item = normalize_tool_call(call, UNKNOWN_TOOL_CALL_ID, turn_ids)
-                    if item["id"] in used_ids:
-                        base_id = item["id"]
-                        n = 2
-                        while f"{base_id}_{n}" in used_ids:
-                            n += 1
-                        item["id"] = f"{base_id}_{n}"
-                    used_ids.add(item["id"])
+                    item = normalize_tool_call(
+                        call,
+                        UNKNOWN_TOOL_CALL_ID,
+                        turn_ids,
+                    )
+
+                    # Tool-call IDs only need to be unique within the
+                    # current assistant turn. Preserve them across turns
+                    # so subsequent tool results can correlate correctly.
                     normalized.append(item)
                     pending_calls[item["id"]] = item
 
@@ -159,8 +181,10 @@ def sanitize_messages_for_request(history):
 
         if role == "tool":
             call_id = message.get("tool_call_id")
+
             if not isinstance(call_id, str) or not call_id.strip():
                 continue
+
             if call_id not in pending_calls:
                 continue
 
@@ -185,103 +209,239 @@ def sanitize_messages_for_request(history):
             })
 
     return copy.deepcopy(output)
+
+
 def redact_secrets(value, limit=4000):
     if not value:
         return ""
+
     text = str(value).replace("\\r", " ").replace("\\n", " ")
     parts = text.split()
     cleaned = []
+
     for part in parts:
         lower = part.lower()
+
         if lower.startswith("bearer") and len(part) > 7:
             cleaned.append(part[:6] + "<redacted>")
-        elif lower.startswith("sk-") or lower.startswith("sk_") or lower.startswith("or-v1-") or lower.startswith("or_"):
+        elif (
+            lower.startswith("sk-")
+            or lower.startswith("sk_")
+            or lower.startswith("or-v1-")
+            or lower.startswith("or_")
+        ):
             cleaned.append("<redacted>")
         else:
             cleaned.append(part)
+
     return " ".join(cleaned)[:limit].rstrip()
 
 
 def describe_provider_error(body):
     if not isinstance(body, str) or not body:
         return {}
+
     try:
         payload = json.loads(body)
     except (TypeError, ValueError):
         return {}
-    if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
+
+    if not isinstance(payload, dict):
         return {}
+
+    if not isinstance(payload.get("error"), dict):
+        return {}
+
     error = payload["error"]
     metadata = error.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
+
+    if not isinstance(metadata, dict):
+        metadata = {}
+
     result = {}
+
     if isinstance(metadata.get("provider_name"), str):
         result["provider"] = metadata["provider_name"]
+
     if isinstance(error.get("code"), int):
         result["code"] = error["code"]
+
     if isinstance(error.get("message"), str):
         result["message"] = redact_secrets(error["message"])
+
     return result
 
 
 def format_http_error(model, status, body):
     details = describe_provider_error(body)
     provider = details.get("provider", "unknown")
-    message = details.get("message") or redact_secrets(body) or "no response body"
+    message = (
+        details.get("message")
+        or redact_secrets(body)
+        or "no response body"
+    )
+
     return f"provider={provider} model={model} status={status} {message}"
 
-# provider result helpers
 
 def _message_from_result(provider, name, result):
-    if result.get('status') != 'response':
-        return None, result.get('error') or 'provider failure'
-    response = result['response']
+    if result.get("status") != "response":
+        return None, result.get("error") or "provider failure"
+
+    response = result["response"]
+
     try:
         data = response.json()
     except ValueError:
-        return None, 'invalid JSON response'
-    choices = data.get('choices') if isinstance(data, dict) else None
-    if not (choices and isinstance(choices[0].get('message'), dict)):
-        return None, 'response contained no choices'
-    message = choices[0]['message']
+        return None, "invalid JSON response"
 
-    # Compatibility path for Qwen3.5 prompt_json mode. This bypasses
-    # llama-server's native tool grammar while retaining Agent 1's typed
-    # execution, policy, approval, and verification boundary.
-    content = message.get('content')
-    if isinstance(content, str) and provider.tool_mode in {'prompt_json', 'json', 'compat'}:
+    choices = data.get("choices") if isinstance(data, dict) else None
+
+    if not (
+        choices
+        and isinstance(choices[0].get("message"), dict)
+    ):
+        return None, "response contained no choices"
+
+    message = choices[0]["message"]
+
+    # Compatibility path for Qwen3.5 prompt_json mode.
+    # This bypasses llama-server's native tool grammar while retaining
+    # Agent 1's typed execution, policy, approval, and verification boundary.
+    content = message.get("content")
+    prompt_modes = {"prompt_json", "json", "compat"}
+
+    # Recover prompt-json tool arguments when llama-server also emits
+    # an empty native-looking tool_call.
+    if isinstance(content, str) and provider.tool_mode in prompt_modes:
         try:
             candidate = json.loads(content.strip())
         except (TypeError, ValueError):
             candidate = None
-        if isinstance(candidate, dict) and isinstance(candidate.get('tool'), str):
-            arguments = candidate.get('arguments', {})
+
+        # Qwen may emit a single tool call wrapped in a one-element array.
+        if (
+            isinstance(candidate, list)
+            and len(candidate) == 1
+            and isinstance(candidate[0], dict)
+        ):
+            candidate = candidate[0]
+
+        if (
+            isinstance(candidate, dict)
+            and isinstance(candidate.get("tool"), str)
+        ):
+            # Do not silently turn missing/malformed arguments into {}.
+            # Preserve a deliberately invalid sentinel so the agent's strict
+            # parser can return a corrective error instead of executing a
+            # seemingly valid empty argument object.
+            arguments = candidate.get("arguments")
             if not isinstance(arguments, dict):
-                arguments = {}
+                arguments = "__INVALID_TOOL_ARGUMENTS__"
+
+            existing_calls = message.get("tool_calls")
+
+            if isinstance(existing_calls, list) and existing_calls:
+                repaired = copy.deepcopy(message)
+                repaired_calls = []
+                repaired_any = False
+
+                for call in existing_calls:
+                    item = normalize_tool_call(call)
+                    fn = item["function"]
+                    raw_args = fn.get("arguments", "{}")
+
+                    try:
+                        parsed_args = (
+                            json.loads(raw_args)
+                            if isinstance(raw_args, str)
+                            else raw_args
+                        )
+                    except (TypeError, ValueError):
+                        parsed_args = None
+
+                    if (
+                        fn.get("name")
+                        in {
+                            candidate["tool"],
+                            None,
+                            "",
+                            "unknown_tool",
+                        }
+                        and (parsed_args == {} or parsed_args is None)
+                    ):
+                        fn["name"] = candidate["tool"]
+                        fn["arguments"] = json.dumps(
+                            arguments,
+                            ensure_ascii=False,
+                        )
+                        repaired_any = True
+
+                    repaired_calls.append(item)
+
+                if repaired_any:
+                    repaired["content"] = ""
+                    repaired["tool_calls"] = repaired_calls
+                    return repaired, None
+
             return {
-                'role': 'assistant',
-                'content': '',
-                'tool_calls': [{
-                    'id': 'qwen_prompt_1',
-                    'type': 'function',
-                    'function': {
-                        'name': candidate['tool'],
-                        'arguments': json.dumps(arguments, ensure_ascii=False),
-                    },
-                }],
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "qwen_prompt_1",
+                        "type": "function",
+                        "function": {
+                            "name": candidate["tool"],
+                            "arguments": json.dumps(
+                                arguments,
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
             }, None
 
     return message, None
 
+
 def ask(messages):
     request_messages = sanitize_messages_for_request(messages)
+
     _PROVIDER.tools = _current_tools()
     model = _PROVIDER.model
+
     try:
-        result = _PROVIDER.call_model(model, request_messages)
+        result = _PROVIDER.call_model(
+            model,
+            request_messages,
+        )
     except Exception as exc:
-        return {"role": "assistant", "content": "Local Qwen failed: " + redact_secrets(f"{type(exc).__name__}: {exc}")}
-    message, error = _message_from_result(_PROVIDER, model, result)
+        return {
+            "role": "assistant",
+            "content": (
+                "Local Qwen failed: "
+                + redact_secrets(
+                    f"{type(exc).__name__}: {exc}"
+                )
+            ),
+        }
+
+    message, error = _message_from_result(
+        _PROVIDER,
+        model,
+        result,
+    )
+
     if message is not None:
         return message
-    return {"role": "assistant", "content": "Local Qwen failed: " + redact_secrets(error or "unknown error")}
+
+    return {
+        "role": "assistant",
+        "content": (
+            "Local Qwen failed: "
+            + redact_secrets(
+                error or "unknown error"
+            )
+        ),
+    }

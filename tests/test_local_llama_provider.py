@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from providers.local_llama_provider import LocalLlamaProvider
-from llm import _message_from_result
+from llm import _message_from_result, sanitize_messages_for_request
 
 
 class LocalLlamaPromptToolModeTests(unittest.TestCase):
@@ -64,6 +64,16 @@ class LlmPromptToolParsingTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "system_info")
         self.assertEqual(message["tool_calls"][0]["function"]["arguments"], "{}")
+
+    def test_sanitizer_preserves_tool_call_id_across_turns(self):
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "system_info", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_1", "name": "system_info", "content": "ok"},
+            {"role": "assistant", "content": "done"},
+        ]
+        sanitized = sanitize_messages_for_request(messages)
+        self.assertEqual(sanitized[0]["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(sanitized[1]["tool_call_id"], "call_1")
 
     def test_normal_text_remains_normal_text(self):
         provider = LocalLlamaProvider([])

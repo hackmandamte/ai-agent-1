@@ -1,5 +1,6 @@
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 WORKSPACE_ROOT = Path.cwd().resolve()
@@ -46,13 +47,22 @@ def run(command: str) -> str:
     if normalized in {"python agent.py", "python3 agent.py"}:
         return "ERROR: Recursive agent execution blocked."
 
-    result = subprocess.run(
-        command,
-        shell=True,
-        text=True,
-        capture_output=True,
-        cwd=WORKSPACE_ROOT,
-    )
+    if sys.platform.startswith("win"):
+        # Match the Windows runtime context reported to the model.
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            text=True,
+            capture_output=True,
+            cwd=WORKSPACE_ROOT,
+        )
+    else:
+        result = subprocess.run(
+            command,
+            shell=True,
+            text=True,
+            capture_output=True,
+            cwd=WORKSPACE_ROOT,
+        )
 
     output = result.stdout + result.stderr
     return f"EXIT CODE: {result.returncode}\n{output}"

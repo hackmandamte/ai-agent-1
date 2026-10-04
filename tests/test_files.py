@@ -33,11 +33,12 @@ class FileToolTests(unittest.TestCase):
         self.assertEqual(files.safe_path(absolute_path), target)
         self.assertEqual(files.read_file(absolute_path), "inside")
 
-    def test_absolute_path_outside_workspace_is_rejected(self):
+    def test_absolute_path_outside_workspace_is_accepted(self):
         with tempfile.TemporaryDirectory() as outside_directory:
             outside_path = Path(outside_directory) / "secret.txt"
-            with self.assertRaises(ValueError):
-                files.safe_path(str(outside_path))
+            outside_path.write_text("secret", encoding="utf-8")
+            self.assertEqual(files.safe_path(str(outside_path)), outside_path)
+            self.assertEqual(files.read_file(str(outside_path)), "secret")
 
     def test_read_file_on_directory_returns_controlled_error(self):
         directory = self.workspace / "directory"

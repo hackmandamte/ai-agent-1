@@ -1,27 +1,21 @@
 from pathlib import Path
 import shutil
 
+from tools.policy import path_policy_error
+
 
 WORKSPACE_ROOT = Path.cwd().resolve()
 
 
 def safe_path(path: str) -> Path:
-    """Resolve a workspace-relative or in-workspace absolute path safely."""
-    workspace_root = WORKSPACE_ROOT.resolve()
+    """Resolve PC-wide paths while enforcing centralized protected-path policy."""
     candidate = Path(path)
-
-    # Path joining already handles absolute paths, but making the two cases
-    # explicit prevents platform-specific pathlib behavior from weakening the
-    # workspace boundary.
-    if candidate.is_absolute():
-        target = candidate
-    else:
-        target = workspace_root / candidate
-
+    target = candidate if candidate.is_absolute() else WORKSPACE_ROOT / candidate
     target = target.resolve()
 
-    if target != workspace_root and workspace_root not in target.parents:
-        raise ValueError(f"Path outside workspace: {path}")
+    error = path_policy_error(str(target))
+    if error:
+        raise PermissionError(error)
 
     return target
 
@@ -33,7 +27,12 @@ def read_file(path: str) -> str:
         return f"ERROR: Path is a directory, not a file: {path}"
 
     try:
-        return target.read_text(encoding="utf-8")
+        raw = target.read_bytes()
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            return raw.decode("utf-16")
+        if raw.startswith(b"\xef\xbb\xbf"):
+            return raw.decode("utf-8-sig")
+        return raw.decode("utf-8")
     except IsADirectoryError:
         # A directory can be replaced between the check and the read.
         return f"ERROR: Path is a directory, not a file: {path}"

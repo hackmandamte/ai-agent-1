@@ -113,6 +113,24 @@ class TaskManager:
         ]
         return max(candidates, key=lambda task: task.updated_at) if candidates else None
 
+    def latest_task(self) -> TaskRecord | None:
+        """Return the newest persisted task for explicit repeat/last-task requests."""
+        records = self.store.list()
+        return max(records, key=lambda task: task.updated_at) if records else None
+
+    def repeat(self, task_id: str) -> TaskRecord:
+        """Restart a prior task intentionally requested by the user."""
+        task = self.store.load(task_id)
+        task.status = "running"
+        task.current_step = 0
+        task.retries = 0
+        task.last_error = None
+        task.verified = False
+        task.history.append({"event": "repeated", "at": _now()})
+        self.task = task
+        self.store.save(task)
+        return task
+
     def find_resumable(self, goal: str) -> TaskRecord | None:
         """Prefer an exact goal match, then fall back to the newest resumable task."""
         candidates = self.store.active() + [

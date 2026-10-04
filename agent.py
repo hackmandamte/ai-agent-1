@@ -121,6 +121,8 @@ def execute_tool(name, arguments):
             return f"ERROR: Missing required argument(s) for {name}: {', '.join(missing)}"
 
         risk, approval_required, approval_message = policy_result(name, arguments)
+        if risk == "DENY":
+            return approval_message
         if approval_required and not ask_approval(approval_message):
             return f"APPROVAL DENIED: {name} was not executed."
 
@@ -284,17 +286,24 @@ def agent(goal, max_steps=30, resume_task_id=None):
     global _ACTIVE_TASK_MANAGER
     task_manager = TaskManager()
     _ACTIVE_TASK_MANAGER = task_manager
-    resume_words = ("continue", "resume", "already started", "active task", "started a task")
+    resume_words = ("continue", "resume", "already started", "active task", "started a task", "last task", "previous task", "again", "repeat", "retry")
     wants_resume = any(word in goal.lower() for word in resume_words)
     if resume_task_id:
         task = task_manager.resume(resume_task_id)
         goal = task.goal
         messages = task.messages
-    elif wants_resume and task_manager.find_resumable(goal) is not None:
+    elif wants_resume:
         resumable = task_manager.find_resumable(goal)
-        task = task_manager.resume(resumable.task_id)
-        goal = task.goal
-        messages = task.messages
+        explicit_repeat = any(word in goal.lower() for word in ("last task", "previous task", "again", "repeat", "retry"))
+        if explicit_repeat:
+            resumable = task_manager.latest_task()
+        if resumable is not None:
+            task = task_manager.repeat(resumable.task_id) if explicit_repeat else task_manager.resume(resumable.task_id)
+            goal = task.goal
+            messages = task.messages
+        else:
+            task = task_manager.start(goal, max_steps=max_steps)
+            messages = None
     else:
         task = task_manager.start(goal, max_steps=max_steps)
         messages = None
@@ -318,6 +327,8 @@ use them when they are relevant to the user's goal.
 Treat the goal as a multi-step task. For complex work, create a task plan with
 set_task_plan before execution. Respect dependencies, inspect every result, recover
 from errors with a changed approach, and use a verification tool before claiming success.
+For simple questions that require no action, answer directly in normal assistant text;
+do not invent or call an "answer" tool or any other tool that is not explicitly available.
 Task state is checkpointed and can be resumed. Do not claim something is done unless
 you actually performed and verified it.
 
@@ -349,6 +360,29 @@ This runtime context is automatically detected at each agent run.
 
         if not tool_calls:
             final_content = message.get("content", "")
+
+            # Verification requests must be grounded in actual tool execution.
+            # Small local models sometimes answer with a plan instead of calling
+            # the available tools. Do not let that prose terminate the task.
+            verification_goal = goal.lower()
+            requires_verification = any(word in verification_goal for word in ("test", "verify", "verification", "validate"))
+            filesystem_scope = any(word in verification_goal for word in ("filesystem", "file system", "policy", "path"))
+            if requires_verification and filesystem_scope and step + 1 < max_steps:
+                correction = (
+                    "Do not report a plan yet. This is a verification task and you must "
+                    "use the available tools to perform the test before answering. "
+                    "For this filesystem-policy test, perform non-destructive checks on "
+                    "both an allowed user path and protected paths such as C:\\Windows, "
+                    "C:\\Program Files, and C:\\, then report the actual tool results. "
+                    "Do not modify, create, copy, move, or delete anything. Call the "
+                    "appropriate filesystem/verification tools now."
+                )
+                messages.append({"role": "assistant", "content": final_content})
+                messages.append({"role": "user", "content": correction})
+                task_manager.save_messages(messages)
+                print("\n[AGENT GUARD] Verification task produced prose without tool use; requiring actual tool execution.")
+                continue
+
             print("\nAGENT:")
             print(final_content)
             if isinstance(final_content, str) and final_content.startswith("Local Qwen failed:"):

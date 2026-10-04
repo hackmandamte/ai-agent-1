@@ -19,6 +19,21 @@ class PolicyClassificationTests(unittest.TestCase):
         self.assertTrue(approval)
         self.assertIn("x.txt", message)
 
+    def test_task_plan_mutation_requires_approval(self):
+        risk, approval, message = policy_result("set_task_plan", {"steps": [{"id": "s1", "goal": "test"}]})
+        self.assertEqual(risk, WRITE)
+        self.assertTrue(approval)
+        self.assertIn("task plan", message.lower())
+
+    def test_read_only_job_and_web_tools_do_not_require_approval(self):
+        for name, arguments in (
+            ("get_job", {"job_id": "job-1"}),
+            ("web_fetch", {"url": "https://example.com"}),
+        ):
+            risk, approval, _ = policy_result(name, arguments)
+            self.assertEqual(risk, READ)
+            self.assertFalse(approval)
+
     def test_destructive_process_action_requires_approval(self):
         risk, approval, _ = policy_result("terminate_process", {"pid": 1234})
         self.assertEqual(risk, DESTRUCTIVE)
@@ -58,6 +73,11 @@ class PolicyClassificationTests(unittest.TestCase):
             self.assertEqual(risk, READ)
             self.assertFalse(approval)
 
+    def test_obscura_browser_close_requires_approval(self):
+        risk, approval, _ = policy_result("mcp__obscura__browser_close", {})
+        self.assertEqual(risk, HIGH_RISK)
+        self.assertTrue(approval)
+
     def test_obscura_browser_actions_require_approval(self):
         for tool in (
             "mcp__obscura__browser_click",
@@ -65,6 +85,7 @@ class PolicyClassificationTests(unittest.TestCase):
             "mcp__obscura__browser_type",
             "mcp__obscura__browser_press_key",
             "mcp__obscura__browser_evaluate",
+            "mcp__obscura__browser_close",
         ):
             risk, approval, _ = policy_result(tool, {})
             self.assertEqual(risk, HIGH_RISK)

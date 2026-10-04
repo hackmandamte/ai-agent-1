@@ -435,6 +435,35 @@ class ValidArgumentsExecuteNormallyTests(ToolCallRecoveryTestCase):
         write_mock.assert_not_called()
         self.assertTrue(result.startswith("ERROR:"))
 
+    def test_denied_write_is_never_executed(self):
+        with patch.object(agent, "ask_approval", return_value=False), \
+                patch.object(agent, "write_file") as write_mock:
+            result = agent.execute_tool("write_file", {"path": "notes.txt", "content": "blocked"})
+        write_mock.assert_not_called()
+        self.assertIn("APPROVAL DENIED", result)
+
+    def test_denied_delete_is_never_executed(self):
+        with patch.object(agent, "ask_approval", return_value=False), \
+                patch.object(agent, "delete_path") as delete_mock:
+            result = agent.execute_tool("delete_path", {"path": "notes.txt"})
+        delete_mock.assert_not_called()
+        self.assertIn("APPROVAL DENIED", result)
+
+    def test_denied_mcp_action_is_never_executed(self):
+        with patch.object(agent, "ask_approval", return_value=False), \
+                patch.object(agent, "execute_mcp_tool") as mcp_mock:
+            result = agent.execute_tool("mcp__obscura__browser_close", {})
+        mcp_mock.assert_not_called()
+        self.assertIn("APPROVAL DENIED", result)
+
+    def test_protected_path_is_denied_before_approval(self):
+        with patch.object(agent, "ask_approval") as approval_mock, \
+                patch.object(agent, "read_file") as read_mock:
+            result = agent.execute_tool("read_file", {"path": r"C:\Windows"})
+        approval_mock.assert_not_called()
+        read_mock.assert_not_called()
+        self.assertIn("POLICY DENIED", result)
+
 
 class MissingOrNonStringArgumentTests(ToolCallRecoveryTestCase):
     """Requirement 6: missing / non-string arguments are handled safely."""

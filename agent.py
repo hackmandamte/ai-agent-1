@@ -17,9 +17,12 @@ from tools.pc import (
 from tools.jobs import start_job, get_job, list_jobs, job_output, stop_job, restart_job
 from tools.apps import discover_apps, launch_app_id
 from tools.system import disk_usage, network_state, listening_ports, environment_info
+from supervisor import review_action
 
 UNKNOWN_TOOL_NAME = "unknown_tool"
 _ACTIVE_TASK_MANAGER = None
+_READ_ONLY_TASK = False
+_CURRENT_GOAL = ""
 MAX_MODEL_MESSAGES = 8
 MAX_TOOL_RESULT_CHARS = 1200
 MAX_ASSISTANT_CHARS = 1200
@@ -85,6 +88,17 @@ def parse_tool_arguments(function):
     except json.JSONDecodeError as json_error:
         raise json_error
 
+    # Some local-model compatibility paths can serialize the JSON arguments
+    # object one extra time, producing a JSON string containing the object.
+    # Decode that representation once before rejecting the call.
+    if isinstance(arguments, str):
+        try:
+            nested_arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            nested_arguments = None
+        if isinstance(nested_arguments, dict):
+            arguments = nested_arguments
+
     if not isinstance(arguments, dict):
         raise ValueError(
             "Tool arguments must decode to a JSON object, "
@@ -92,6 +106,50 @@ def parse_tool_arguments(function):
         )
 
     return arguments
+
+
+def _read_only_task_requested(goal):
+    goal_lower = str(goal).lower()
+    signals = (
+        "read-only",
+        "read only",
+        "do not modify",
+        "don't modify",
+        "do not change",
+        "don't change",
+        "no changes",
+        "no modifications",
+        "without changing",
+        "purely diagnostic",
+        "diagnostic test",
+        "no action beyond",
+    )
+    return any(signal in goal_lower for signal in signals)
+
+
+READ_ONLY_BLOCKED_TOOLS = {
+    "set_task_plan",
+    "write_file",
+    "create_directory",
+    "copy_path",
+    "move_path",
+    "delete_path",
+    "git_commit",
+    "terminate_process",
+    "launch_app",
+    "launch_app_id",
+    "start_background_job",
+    "start_job",
+    "stop_job",
+    "restart_job",
+}
+
+
+def _read_only_constraint_error(name):
+    return (
+        f"READ-ONLY TASK DENIED: {name} was not executed. "
+        "The current user task explicitly forbids modifications or mutating actions."
+    )
 
 
 def execute_tool(name, arguments):
@@ -123,8 +181,36 @@ def execute_tool(name, arguments):
         risk, approval_required, approval_message = policy_result(name, arguments)
         if risk == "DENY":
             return approval_message
-        if approval_required and not ask_approval(approval_message):
-            return f"APPROVAL DENIED: {name} was not executed."
+
+        # Explicit user read-only constraints override model intent and approval.
+        # Mutating actions must never reach approval or their implementation.
+        if _READ_ONLY_TASK:
+            if name in READ_ONLY_BLOCKED_TOOLS:
+                return _read_only_constraint_error(name)
+
+            if name == "shell" and risk != "READ":
+                return _read_only_constraint_error(name)
+
+            if is_mcp_tool(name) and risk != "READ":
+                return _read_only_constraint_error(name)
+
+            if risk in {"WRITE", "DESTRUCTIVE", "HIGH_RISK"}:
+                return _read_only_constraint_error(name)
+        # Agent 2 reviews the proposed action before any side effect.
+        authorization = _ACTIVE_TASK_MANAGER.get_authorization() if _ACTIVE_TASK_MANAGER is not None else None
+        task_context = _ACTIVE_TASK_MANAGER.supervisor_context() if _ACTIVE_TASK_MANAGER is not None else None
+        supervisor = review_action(_CURRENT_GOAL, name, arguments, risk, authorization, task_context)
+        if _ACTIVE_TASK_MANAGER is not None:
+            _ACTIVE_TASK_MANAGER.record_supervisor_review(name, arguments, risk, supervisor.verdict, supervisor.reason)
+        if supervisor.verdict == "BLOCK":
+            return f"SUPERVISOR BLOCKED: {supervisor.reason}"
+
+        if supervisor.verdict == "APPROVAL_REQUIRED":
+            approval_text = approval_message
+            if supervisor.reason:
+                approval_text = f"{approval_message}\nSupervisor: {supervisor.reason}"
+            if not ask_approval(approval_text):
+                return f"APPROVAL DENIED: {name} was not executed."
 
         if name == "set_task_plan":
             task_manager = _ACTIVE_TASK_MANAGER
@@ -281,7 +367,7 @@ def execute_tool(name, arguments):
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-def agent(goal, max_steps=30, resume_task_id=None):
+def _agent_impl(goal, max_steps=2_000_000_000, resume_task_id=None):
     # The task manager persists orchestration state independently of the LLM.
     global _ACTIVE_TASK_MANAGER
     task_manager = TaskManager()
@@ -360,6 +446,27 @@ This runtime context is automatically detected at each agent run.
 
         if not tool_calls:
             final_content = message.get("content", "")
+
+            # Coding/build/deploy tasks must end with an actual verification call,
+            # not merely the small model claiming that the work is complete.
+            verification_goal = goal.lower()
+            requires_verification = any(word in verification_goal for word in (
+                "code", "coding", "app", "website", "build", "compile", "test",
+                "deploy", "ship", "implement", "fix", "create",
+            ))
+            if requires_verification and not task.verified and step + 1 < max_steps:
+                correction = (
+                    "Do not claim completion yet. This is an execution task and the "
+                    "task has not been independently verified. Use the verification "
+                    "tools now. Run the project's relevant compile/build/test checks "
+                    "with verify_command, and verify the important output/files. "
+                    "Only finish after at least one positive verification result."
+                )
+                messages.append({"role": "assistant", "content": final_content})
+                messages.append({"role": "user", "content": correction})
+                task_manager.save_messages(messages)
+                print("\n[AGENT GUARD] Completion claim rejected until verification succeeds.")
+                continue
 
             # Verification requests must be grounded in actual tool execution.
             # Small local models sometimes answer with a plan instead of calling
@@ -485,6 +592,20 @@ This runtime context is automatically detected at each agent run.
     print("\nAgent reached maximum steps.")
 
 
+def agent(goal, max_steps=2_000_000_000, resume_task_id=None):
+    """Run one agent task with task-scoped read-only enforcement."""
+    global _READ_ONLY_TASK, _CURRENT_GOAL
+    previous_read_only = _READ_ONLY_TASK
+    previous_goal = _CURRENT_GOAL
+    _READ_ONLY_TASK = _read_only_task_requested(goal)
+    _CURRENT_GOAL = str(goal)
+    try:
+        return _agent_impl(goal, max_steps=max_steps, resume_task_id=resume_task_id)
+    finally:
+        _READ_ONLY_TASK = previous_read_only
+        _CURRENT_GOAL = previous_goal
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -492,8 +613,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=30,
-        help="Maximum number of agent steps (default: 30)",
+        default=2_000_000_000,
+        help="Maximum number of agent steps (default: 2 billion)",
     )
     parser.add_argument(
         "goal",

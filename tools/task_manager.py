@@ -12,6 +12,8 @@ from pathlib import Path
 import json
 import uuid
 
+from task_authorization import TaskAuthorization
+
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 TASK_ROOT = WORKSPACE_ROOT / ".agent_state" / "tasks"
 
@@ -36,6 +38,7 @@ class TaskRecord:
     updated_at: str = field(default_factory=_now)
     last_error: str | None = None
     verified: bool = False
+    authorization: dict = field(default_factory=dict)
     plan: list[dict] = field(default_factory=list)
     messages: list[dict] = field(default_factory=list)
     history: list[dict] = field(default_factory=list)
@@ -145,16 +148,52 @@ class TaskManager:
         return max(candidates, key=lambda task: task.updated_at)
 
     def start(self, goal: str, max_steps: int = 30, retry_budget: int = 2) -> TaskRecord:
+        authorization = TaskAuthorization(workspace=str(WORKSPACE_ROOT)).snapshot()
         task = TaskRecord(
             task_id=uuid.uuid4().hex,
             goal=goal,
             max_steps=max_steps,
             retry_budget=max(0, retry_budget),
             status="running",
+            authorization=authorization,
         )
         self.task = task
         self.store.save(task)
         return task
+
+    def get_authorization(self) -> TaskAuthorization:
+        task = self._require_task()
+        data = dict(task.authorization or {})
+        return TaskAuthorization(**data) if data else TaskAuthorization(workspace=str(WORKSPACE_ROOT))
+
+    def supervisor_context(self) -> dict:
+        """Return bounded task state that lets remote Supervisor 2 match actions to the user task."""
+        task = self._require_task()
+        recent_history = task.history[-8:]
+        return {
+            "task_id": task.task_id,
+            "user_goal": task.goal[:4000],
+            "current_step": task.current_step,
+            "plan": task.plan[:20],
+            "recent_history": recent_history,
+            "verified": task.verified,
+            "status": task.status,
+        }
+
+    def record_supervisor_review(self, tool: str, arguments: dict, risk: str, verdict: str, reason: str) -> None:
+        """Persist the supervisor decision so later reviews have task continuity."""
+        task = self._require_task()
+        task.history.append({
+            "event": "supervisor_review",
+            "step": task.current_step,
+            "tool": str(tool)[:200],
+            "risk": str(risk)[:100],
+            "arguments_preview": str(arguments)[:1200],
+            "verdict": str(verdict)[:50],
+            "reason": str(reason)[:1000],
+            "at": _now(),
+        })
+        self.store.save(task)
 
     def set_plan(self, steps: list[dict]) -> None:
         task = self._require_task()
@@ -198,6 +237,7 @@ class TaskManager:
                 "exists=True" in result
                 or "contains=True" in result
                 or "match=True" in result
+                or "exit_code=0" in result
             )
             if positive:
                 task.verified = True

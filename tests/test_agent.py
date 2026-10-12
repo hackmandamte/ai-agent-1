@@ -86,6 +86,23 @@ class ToolCallRecoveryTestCase(unittest.TestCase):
         return matching[0]
 
 
+class ReadOnlyTaskLifecycleTests(unittest.TestCase):
+    def test_read_only_flag_is_restored_after_agent_returns(self):
+        original = agent._READ_ONLY_TASK
+        try:
+            agent._READ_ONLY_TASK = False
+            with patch.object(agent, "_agent_impl", return_value=None):
+                agent.agent("purely diagnostic read-only task")
+            self.assertFalse(agent._READ_ONLY_TASK)
+
+            agent._READ_ONLY_TASK = True
+            with patch.object(agent, "_agent_impl", return_value=None):
+                agent.agent("normal task")
+            self.assertTrue(agent._READ_ONLY_TASK)
+        finally:
+            agent._READ_ONLY_TASK = original
+
+
 class MalformedArgumentsDoNotCrashAgentTests(ToolCallRecoveryTestCase):
     """Requirement 1: malformed JSON tool arguments cannot crash the agent."""
 
@@ -149,6 +166,26 @@ class MalformedToolCallsAreNotExecutedTests(ToolCallRecoveryTestCase):
                 ])
 
                 self.assertEqual(result.execute_calls, [])
+
+    def test_double_encoded_object_arguments_are_recovered(self):
+        result = self.run_agent([
+            assistant_tool_call_message(
+                tool_call("call_nested", "git_status", json.dumps("{}"))
+            ),
+            final_message(),
+        ])
+
+        self.assertEqual(result.execute_calls, [("git_status", {})])
+
+    def test_non_object_string_arguments_are_still_rejected(self):
+        result = self.run_agent([
+            assistant_tool_call_message(
+                tool_call("call_bad", "shell", json.dumps("not an object"))
+            ),
+        ])
+
+        self.assertEqual(result.execute_calls, [])
+        self.assertIn("Tool arguments must decode to a JSON object", result.output)
 
     def test_non_string_arguments_are_not_executed(self):
         for raw in ([], {"command": "ls"}, 7, True):
@@ -436,7 +473,12 @@ class ValidArgumentsExecuteNormallyTests(ToolCallRecoveryTestCase):
         self.assertTrue(result.startswith("ERROR:"))
 
     def test_denied_write_is_never_executed(self):
-        with patch.object(agent, "ask_approval", return_value=False), \
+        # Isolate this direct tool call from any task authorization left by
+        # another test; without an authorized task, writes require approval.
+        decision = SimpleNamespace(verdict="APPROVAL_REQUIRED", reason="Test requires approval.")
+        with patch.object(agent, "_ACTIVE_TASK_MANAGER", None), \
+                patch.object(agent, "review_action", return_value=decision), \
+                patch.object(agent, "ask_approval", return_value=False), \
                 patch.object(agent, "write_file") as write_mock:
             result = agent.execute_tool("write_file", {"path": "notes.txt", "content": "blocked"})
         write_mock.assert_not_called()
@@ -447,14 +489,71 @@ class ValidArgumentsExecuteNormallyTests(ToolCallRecoveryTestCase):
                 patch.object(agent, "delete_path") as delete_mock:
             result = agent.execute_tool("delete_path", {"path": "notes.txt"})
         delete_mock.assert_not_called()
-        self.assertIn("APPROVAL DENIED", result)
+        self.assertIn("SUPERVISOR BLOCKED", result)
 
     def test_denied_mcp_action_is_never_executed(self):
         with patch.object(agent, "ask_approval", return_value=False), \
                 patch.object(agent, "execute_mcp_tool") as mcp_mock:
             result = agent.execute_tool("mcp__obscura__browser_close", {})
         mcp_mock.assert_not_called()
-        self.assertIn("APPROVAL DENIED", result)
+        self.assertIn("SUPERVISOR BLOCKED", result)
+
+    def test_read_only_task_blocks_git_commit_before_approval(self):
+        agent._READ_ONLY_TASK = True
+
+        try:
+            with patch.object(agent, "ask_approval") as approval_mock, \
+                    patch.object(agent, "git_commit") as commit_mock:
+                result = agent.execute_tool(
+                    "git_commit",
+                    {"message": "should not happen"},
+                )
+
+            approval_mock.assert_not_called()
+            commit_mock.assert_not_called()
+            self.assertIn("READ-ONLY TASK DENIED", result)
+        finally:
+            agent._READ_ONLY_TASK = False
+
+    def test_read_only_task_blocks_write_before_approval(self):
+        agent._READ_ONLY_TASK = True
+
+        try:
+            with patch.object(agent, "ask_approval") as approval_mock, \
+                    patch.object(agent, "write_file") as write_mock:
+                result = agent.execute_tool(
+                    "write_file",
+                    {"path": "blocked.txt", "content": "blocked"},
+                )
+
+            approval_mock.assert_not_called()
+            write_mock.assert_not_called()
+            self.assertIn("READ-ONLY TASK DENIED", result)
+        finally:
+            agent._READ_ONLY_TASK = False
+
+    def test_read_only_task_allows_read_only_tool(self):
+        agent._READ_ONLY_TASK = True
+
+        try:
+            with patch.object(agent, "git_status", return_value="status") as status_mock:
+                result = agent.execute_tool("git_status", {})
+
+            status_mock.assert_called_once_with()
+            self.assertEqual(result, "status")
+        finally:
+            agent._READ_ONLY_TASK = False
+
+    def test_read_only_task_is_detected_from_goal(self):
+        self.assertTrue(agent._read_only_task_requested(
+            "Run a purely diagnostic test. Do not modify anything."
+        ))
+        self.assertTrue(agent._read_only_task_requested(
+            "This is read-only. Do not change anything."
+        ))
+        self.assertFalse(agent._read_only_task_requested(
+            "Commit the changes."
+        ))
 
     def test_protected_path_is_denied_before_approval(self):
         with patch.object(agent, "ask_approval") as approval_mock, \
